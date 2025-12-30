@@ -9,8 +9,6 @@ CONF_DIR="/etc/wssh-vpn"
 CONF_FILE="${CONF_DIR}/config.yaml"
 DATA_DIR="/var/lib/wssh-vpn"
 
-SERVICE="/etc/systemd/system/${APP}.service"
-
 echo "🚀 Instalador do ${APP}"
 echo
 
@@ -20,7 +18,7 @@ if [ "$EUID" -ne 0 ]; then
   exit 1
 fi
 
-# deps mínimas
+# deps
 command -v curl >/dev/null || {
   echo "❌ curl não encontrado"
   exit 1
@@ -33,62 +31,33 @@ echo "⬇️ Baixando binário..."
 curl -fsSL "$BIN_URL" -o "$BIN_PATH"
 chmod +x "$BIN_PATH"
 
-# ===============================
-# CLI INTERATIVA (SETUP)
-# ===============================
-if [ ! -f "$CONF_FILE" ]; then
-  echo
-  echo "🔧 Configuração inicial"
-  echo "----------------------------------"
-  echo "👉 Agora será aberta a CLI interativa"
-  echo
+echo
+echo "🔧 Configuração inicial"
+echo "----------------------------------"
+echo "👉 Agora será aberta a CLI interativa"
+echo
 
-  # garante TTY
-  if [ ! -t 0 ]; then
-    echo "❌ Este instalador precisa de um terminal interativo"
-    exit 1
-  fi
-
-  ${BIN_PATH} init
-
-  if [ ! -f "$CONF_FILE" ]; then
-    echo "❌ Configuração não criada. Abortando."
-    exit 1
-  fi
-else
-  echo "ℹ️ Configuração já existe, pulando init"
+# precisa de TTY
+if [ ! -t 0 ]; then
+  echo "❌ Este instalador precisa de um terminal interativo"
+  exit 1
 fi
 
-# ===============================
-# SYSTEMD
-# ===============================
-echo
-echo "⚙️ Criando serviço systemd..."
+# roda o wizard
+${BIN_PATH} init
 
-cat > "$SERVICE" <<EOF
-[Unit]
-Description=WSSH VPN Server
-After=network.target
-
-[Service]
-Type=simple
-ExecStart=${BIN_PATH} run --config ${CONF_FILE}
-Restart=always
-RestartSec=3
-LimitNOFILE=1048576
-
-[Install]
-WantedBy=multi-user.target
-EOF
-
-systemctl daemon-reload
-systemctl enable ${APP}
-systemctl restart ${APP}
+if [ ! -f "$CONF_FILE" ]; then
+  echo "❌ Configuração não foi criada. Abortando."
+  exit 1
+fi
 
 echo
-echo "✅ Instalação concluída com sucesso!"
+echo "✅ Instalação concluída!"
 echo
-echo "📌 Comandos úteis:"
-echo "  systemctl status ${APP}"
-echo "  journalctl -u ${APP} -f"
-echo "  nano ${CONF_FILE}"
+echo "▶️ Para iniciar o servidor:"
+echo "   sudo wssh-vpn run --config ${CONF_FILE}"
+echo
+echo "📄 Editar configuração:"
+echo "   nano ${CONF_FILE}"
+echo
+echo "⛔ Para parar: CTRL+C"
