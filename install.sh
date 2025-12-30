@@ -18,7 +18,7 @@ if [ "$EUID" -ne 0 ]; then
   exit 1
 fi
 
-# deps
+# dependência mínima
 command -v curl >/dev/null || {
   echo "❌ curl não encontrado"
   exit 1
@@ -34,30 +34,22 @@ chmod +x "$BIN_PATH"
 echo
 echo "🔧 Configuração inicial"
 echo "----------------------------------"
-echo "👉 Agora será aberta a CLI interativa"
+echo "👉 Executando CLI do ${APP}"
 echo
 
-# precisa de TTY
-if [ ! -t 0 ]; then
-  echo "❌ Este instalador precisa de um terminal interativo"
-  exit 1
-fi
+# roda o wizard SEM verificar TTY
+${BIN_PATH} init || true
 
-# roda o wizard
-${BIN_PATH} init
-
+# avisa se não criou config
 if [ ! -f "$CONF_FILE" ]; then
-  echo "❌ Configuração não foi criada. Abortando."
-  exit 1
+  echo
+  echo "⚠️ Configuração não encontrada em ${CONF_FILE}"
+  echo "   Se necessário, execute manualmente:"
+  echo "   sudo ${APP} init"
+else
+  echo
+  echo "✅ Configuração criada em ${CONF_FILE}"
 fi
 
 echo
 echo "✅ Instalação concluída!"
-echo
-echo "▶️ Para iniciar o servidor:"
-echo "   sudo wssh-vpn run --config ${CONF_FILE}"
-echo
-echo "📄 Editar configuração:"
-echo "   nano ${CONF_FILE}"
-echo
-echo "⛔ Para parar: CTRL+C"
