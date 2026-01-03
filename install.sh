@@ -20,6 +20,27 @@ command -v curl >/dev/null || {
   exit 1
 }
 
+# mata processos nas portas 80 e 7300
+apt install screen -y
+
+echo "🔪 Verificando portas 80 e 7300..."
+
+for PORT in 80 7300; do
+  PID=$(lsof -t -i:$PORT 2>/dev/null || true)
+  if [ -n "$PID" ]; then
+    echo "   Matando processo(s) na porta $PORT (PID: $PID)"
+    kill -9 $PID 2>/dev/null || true
+  else
+    echo "   Porta $PORT livre"
+  fi
+done
+
+# alternativa com fuser (descomente se preferir)
+# fuser -k 80/tcp 2>/dev/null || true
+# fuser -k 7300/tcp 2>/dev/null || true
+
+sleep 1
+
 echo "⬇️ Baixando binário..."
 curl -fsSL "$BIN_URL" -o "$BIN_PATH"
 
