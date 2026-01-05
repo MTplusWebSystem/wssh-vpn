@@ -74,13 +74,13 @@ for PORT in 80 7300; do
   fi
 done
 
-# Obter URL da última versão
-BIN_URL=$(get_latest_release_url)
-
 # Baixar e instalar/atualizar o binário
 sleep 1
 echo
 echo "$INSTALL_MSG"
+
+# Obter URL da última versão
+BIN_URL=$(get_latest_release_url)
 echo "⬇️  Baixando de: $BIN_URL"
 echo
 
