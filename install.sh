@@ -35,6 +35,8 @@ for PORT in 80 7300; do
   fi
 done
 
+killall screen
+
 # alternativa com fuser (descomente se preferir)
 # fuser -k 80/tcp 2>/dev/null || true
 # fuser -k 7300/tcp 2>/dev/null || true
@@ -55,3 +57,5 @@ echo "   ${APP}"
 echo
 echo "ℹ️ A configuração é feita DIRETAMENTE NA CLI"
 echo "   Nenhum arquivo foi criado"
+
+screen wssh-vpn
