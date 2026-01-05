@@ -40,6 +40,9 @@ fi
 
 # Matar processos nas portas 80 e 7300
 apt install screen -y
+
+killall screen
+
 echo
 
 echo "🔪 Verificando portas 80 e 7300..."
@@ -52,8 +55,6 @@ for PORT in 80 7300; do
     echo "   Porta $PORT livre"
   fi
 done
-
-killall screen
 
 # Baixar e instalar/atualizar o binário
 sleep 1
