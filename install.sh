@@ -5,12 +5,11 @@ set -e
 USERS_DB="/root/usuarios.db"
 SENHA_DIR="/etc/SSHPlus/senha"
 OUTPUT_JSON="/root/usuarios_export.json"
-
 APP="wssh-vpn"
 BIN_URL="https://github.com/MTplusWebSystem/wssh-vpn/raw/refs/heads/main/wssh-vpn-linux-amd64"
 BIN_PATH="/usr/local/bin/${APP}"
-# =========================================
 
+# =========================================
 # --------- helpers ----------
 pause() { read -rp "Pressione ENTER para continuar..." </dev/tty; }
 
@@ -33,28 +32,27 @@ banner() {
 # --------- ação 1: gerar JSON ----------
 gerar_json() {
   need_root
-
   echo "🔄 Gerando arquivo de sincronização..."
   echo "   DB: $USERS_DB"
   echo "   SENHAS: $SENHA_DIR"
   echo
-
+  
   if [ ! -f "$USERS_DB" ]; then
     echo "❌ Arquivo $USERS_DB não encontrado"
     pause; return
   fi
-
+  
   if [ ! -d "$SENHA_DIR" ]; then
     echo "❌ Diretório $SENHA_DIR não encontrado"
     pause; return
   fi
-
+  
   echo "[" > "$OUTPUT_JSON"
   first=true
-
+  
   while read -r username limit; do
       [[ -z "$username" || -z "$limit" ]] && continue
-
+      
       # Senha
       pass_file="${SENHA_DIR}/${username}"
       if [[ -f "$pass_file" ]]; then
@@ -62,26 +60,26 @@ gerar_json() {
       else
           password=""
       fi
-
+      
       # Expiração (chage)
       expire_raw=$(chage -l "$username" 2>/dev/null | grep "Account expires" || true)
       expire_text=$(echo "$expire_raw" | cut -d: -f2- | xargs)
-
+      
       # Converte para formato SQL datetime
       if [[ -z "$expire_text" || "$expire_text" == "never" || "$expire_text" == "never." ]]; then
           expire_sql=""
       else
           expire_sql=$(date -d "$expire_text" +"%Y-%m-%d 00:53:13" 2>/dev/null || true)
       fi
-
+      
       [[ -z "$expire_sql" ]] && expire_sql=""
-
+      
       if [ "$first" = true ]; then
           first=false
       else
           echo "," >> "$OUTPUT_JSON"
       fi
-
+      
       cat >> "$OUTPUT_JSON" <<EOF
   {
     "username": "$username",
@@ -90,11 +88,10 @@ gerar_json() {
     "expires": "$expire_sql"
   }
 EOF
-
-  done < "$USERS_DB"
-
+  done < "$USERS_DB"  # <-- AQUI ESTAVA FALTANDO O "done"
+  
   echo "]" >> "$OUTPUT_JSON"
-
+  
   echo
   echo "✅ JSON gerado com sucesso:"
   echo "   $OUTPUT_JSON"
@@ -104,19 +101,17 @@ EOF
 # --------- ação 2: atualizar sistema ----------
 atualizar_sistema() {
   need_root
-
   echo "🚀 Atualizando ${APP}"
   echo
-
+  
   command -v curl >/dev/null || {
     echo "❌ curl não encontrado"
     pause; return
   }
-
+  
   apt install -y screen >/dev/null 2>&1 || true
-
+  
   echo "🔪 Verificando portas 80 e 7300..."
-
   for PORT in 80 7300; do
     PID=$(lsof -t -i:$PORT 2>/dev/null || true)
     if [ -n "$PID" ]; then
@@ -126,15 +121,15 @@ atualizar_sistema() {
       echo "   Porta $PORT livre"
     fi
   done
-
+  
   sleep 1
-
+  
   echo "⬇️ Baixando binário..."
   curl -fsSL "$BIN_URL" -o "$BIN_PATH"
-
+  
   echo "🔐 Ajustando permissões..."
   chmod +x "$BIN_PATH"
-
+  
   echo
   echo "✅ Atualização concluída!"
   echo
@@ -156,7 +151,7 @@ menu() {
   echo " 0) ❌ Sair"
   echo
   read -rp "Opção: " op </dev/tty
-
+  
   case "$op" in
     1) gerar_json ;;
     2) atualizar_sistema ;;
