@@ -12,7 +12,7 @@ BIN_PATH="/usr/local/bin/${APP}"
 # =========================================
 
 # --------- helpers ----------
-pause() { read -rp "Pressione ENTER para continuar..."; }
+pause() { read -rp "Pressione ENTER para continuar..." </dev/tty; }
 
 need_root() {
   if [ "$EUID" -ne 0 ]; then
@@ -71,7 +71,6 @@ gerar_json() {
       if [[ -z "$expire_text" || "$expire_text" == "never" || "$expire_text" == "never." ]]; then
           expire_sql=""
       else
-          # Ex: "Jan 13, 2026" -> "2026-01-13 00:53:13"
           expire_sql=$(date -d "$expire_text" +"%Y-%m-%d 00:53:13" 2>/dev/null || true)
       fi
 
@@ -109,13 +108,11 @@ atualizar_sistema() {
   echo "🚀 Atualizando ${APP}"
   echo
 
-  # precisa de curl
   command -v curl >/dev/null || {
     echo "❌ curl não encontrado"
     pause; return
   }
 
-  # screen (usado pelo seu ambiente)
   apt install -y screen >/dev/null 2>&1 || true
 
   echo "🔪 Verificando portas 80 e 7300..."
@@ -150,8 +147,6 @@ atualizar_sistema() {
 }
 
 # --------- menu ----------
-pause() { read -rp "Pressione ENTER para continuar..." </dev/tty; }
-
 menu() {
   banner
   echo "Escolha uma opção:"
@@ -170,3 +165,7 @@ menu() {
   esac
 }
 
+# --------- loop principal ----------
+while true; do
+  menu
+done
