@@ -39,12 +39,14 @@ gerar_json() {
   
   if [ ! -f "$USERS_DB" ]; then
     echo "❌ Arquivo $USERS_DB não encontrado"
-    pause; return
+    pause
+    return
   fi
   
   if [ ! -d "$SENHA_DIR" ]; then
     echo "❌ Diretório $SENHA_DIR não encontrado"
-    pause; return
+    pause
+    return
   fi
   
   echo "[" > "$OUTPUT_JSON"
@@ -88,7 +90,7 @@ gerar_json() {
     "expires": "$expire_sql"
   }
 EOF
-  done < "$USERS_DB"  # <-- AQUI ESTAVA FALTANDO O "done"
+  done < "$USERS_DB"
   
   echo "]" >> "$OUTPUT_JSON"
   
@@ -106,7 +108,8 @@ atualizar_sistema() {
   
   command -v curl >/dev/null || {
     echo "❌ curl não encontrado"
-    pause; return
+    pause
+    return
   }
   
   apt install -y screen >/dev/null 2>&1 || true
