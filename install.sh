@@ -150,6 +150,8 @@ atualizar_sistema() {
 }
 
 # --------- menu ----------
+pause() { read -rp "Pressione ENTER para continuar..." </dev/tty; }
+
 menu() {
   banner
   echo "Escolha uma opção:"
@@ -158,7 +160,7 @@ menu() {
   echo " 2) ⬆️ Atualizar / Reinstalar wssh-vpn"
   echo " 0) ❌ Sair"
   echo
-  read -rp "Opção: " op
+  read -rp "Opção: " op </dev/tty
 
   case "$op" in
     1) gerar_json ;;
@@ -168,7 +170,3 @@ menu() {
   esac
 }
 
-# --------- loop ----------
-while true; do
-  menu
-done
