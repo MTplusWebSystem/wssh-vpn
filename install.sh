@@ -103,7 +103,7 @@ EOF
 # --------- ação 2: atualizar sistema ----------
 atualizar_sistema() {
   need_root
-  echo "🚀 Atualizando ${APP}"
+  echo "🚀 Atualizando/Baixando ${APP}"
   echo
   
   command -v curl >/dev/null || {
@@ -138,6 +138,13 @@ atualizar_sistema() {
   echo
   echo "▶️ Para executar e configurar pela CLI:"
   echo "   ${APP}"
+  echo "🤖 Usuário de login:admin"
+  echo "🔐Senha Usuário de login:admin123"
+  echo
+  echo "🛣️ Rotas"
+  echo "🌐 IP:81"
+  echo "🌐 IP:81/clientes"
+  echo "🌐 IP:81/revendedores"
   echo
   echo "ℹ️ A configuração é feita DIRETAMENTE NA CLI"
   echo "   Nenhum arquivo foi criado"
@@ -150,7 +157,7 @@ menu() {
   echo "Escolha uma opção:"
   echo
   echo " 1) 🔄 Gerar arquivo de sincronização (SSHPlus)"
-  echo " 2) ⬆️ Atualizar / Reinstalar wssh-vpn"
+  echo " 2) ⬆️ Instalar /Atualizar / Reinstalar wssh-vpn"
   echo " 0) ❌ Sair"
   echo
   read -rp "Opção: " op </dev/tty
