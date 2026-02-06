@@ -144,7 +144,7 @@ atualizar_sistema() {
   echo "🛣️  Rotas"
   echo "🌐 IP:81"
   echo "🌐 IP:81/clientes"
-  echo "🌐 IP:81/revendedores"
+  echo "🌐 IP:81/revenda"
   echo
   echo "ℹ️ A configuração é feita DIRETAMENTE NA CLI"
   echo "   Nenhum arquivo foi criado"
