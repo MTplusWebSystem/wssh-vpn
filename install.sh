@@ -115,6 +115,7 @@ atualizar_sistema() {
   apt install -y screen >/dev/null 2>&1 || true
   
   echo "🔪 Verificando portas 80 e 7300..."
+  sudo systemctl stop checkuser
   for PORT in 80 7300; do
     PID=$(lsof -t -i:$PORT 2>/dev/null || true)
     if [ -n "$PID" ]; then
