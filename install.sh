@@ -1,88 +1,120 @@
-#!/usr/bin/env bash
-set -e
+#!/bin/bash
 
-# ================= CONFIG =================
+# ══════════════════════════════════════════════════════════════
+#   WSSH-VPN • MENU DE MANUTENÇÃO / SINCRONIZAÇÃO
+#   Compatível: SSHPlus
+#   Versão: 2.0
+# ══════════════════════════════════════════════════════════════
+
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+CYAN='\033[0;36m'
+BLUE='\033[0;34m'
+MAGENTA='\033[0;35m'
+WHITE='\033[1;37m'
+NC='\033[0m'
+
 USERS_DB="/root/usuarios.db"
 SENHA_DIR="/etc/SSHPlus/senha"
 OUTPUT_JSON="/root/usuarios_export.json"
 APP="wssh-vpn"
 BIN_URL="https://github.com/MTplusWebSystem/wssh-vpn/raw/refs/heads/main/wssh-vpn-linux-amd64"
 BIN_PATH="/usr/local/bin/${APP}"
+CHECKUSER_SERVICE="checkuser"
+CHECKUSER_FILE="/etc/systemd/system/${CHECKUSER_SERVICE}.service"
+CHECKUSER_BIN="/usr/local/bin/${CHECKUSER_SERVICE}"
+LOG_FILE="/var/log/wssh-vpn-manutencao.log"
 
-# =========================================
-# --------- helpers ----------
-pause() { read -rp "Pressione ENTER para continuar..." </dev/tty; }
+log_ok()     { echo -e "${GREEN}  ✔  $1${NC}";             _log "OK"    "$1"; }
+log_warn()   { echo -e "${YELLOW}  ⚠  $1${NC}";            _log "WARN"  "$1"; }
+log_err()    { echo -e "${RED}  ✘  $1${NC}";               _log "ERROR" "$1"; }
+log_info()   { echo -e "${CYAN}  ➤  $1${NC}";              _log "INFO"  "$1"; }
+log_step()   { echo -e "${MAGENTA}  ▸  $1${NC}";           _log "STEP"  "$1"; }
+_log()       { echo "[$(date '+%Y-%m-%d %H:%M:%S')] [$1] $2" >> "$LOG_FILE"; }
+
+separator()  { echo -e "${BLUE}  ────────────────────────────────────────${NC}"; }
+
+pause() {
+  echo
+  read -rp "  Pressione ENTER para continuar..." </dev/tty
+}
 
 need_root() {
   if [ "$EUID" -ne 0 ]; then
-    echo "❌ Execute como root (sudo)"
+    echo -e "${RED}  ✘  Execute como root: sudo $0${NC}"
     exit 1
   fi
 }
 
 banner() {
   clear
-  echo "===================================================="
-  echo "   WSSH-VPN • MENU DE MANUTENÇÃO / SINCRONIZAÇÃO"
-  echo "   Compatível: SSHPlus"
-  echo "===================================================="
+  echo
+  echo -e "${CYAN}  ╔══════════════════════════════════════════╗${NC}"
+  echo -e "${CYAN}  ║${WHITE}      WSSH-VPN • MENU DE MANUTENÇÃO       ${CYAN}║${NC}"
+  echo -e "${CYAN}  ║${WHITE}      Compatível: SSHPlus  │  v2.0        ${CYAN}║${NC}"
+  echo -e "${CYAN}  ╚══════════════════════════════════════════╝${NC}"
+  echo -e "  ${YELLOW}Log: ${LOG_FILE}${NC}"
   echo
 }
 
-# --------- ação 1: gerar JSON ----------
 gerar_json() {
   need_root
-  echo "🔄 Gerando arquivo de sincronização..."
-  echo "   DB: $USERS_DB"
-  echo "   SENHAS: $SENHA_DIR"
   echo
-  
+  echo -e "${CYAN}  ╔══════════════════════════════════════════╗${NC}"
+  echo -e "${CYAN}  ║${WHITE}     Gerar Arquivo de Sincronização       ${CYAN}║${NC}"
+  echo -e "${CYAN}  ╚══════════════════════════════════════════╝${NC}"
+  echo
+  log_info "Banco de dados : $USERS_DB"
+  log_info "Dir. de senhas : $SENHA_DIR"
+  log_info "Saída JSON     : $OUTPUT_JSON"
+  separator
+
+  # Verificações
   if [ ! -f "$USERS_DB" ]; then
-    echo "❌ Arquivo $USERS_DB não encontrado"
-    pause
-    return
+    log_err "Arquivo não encontrado: $USERS_DB"
+    pause; return 1
   fi
-  
+
   if [ ! -d "$SENHA_DIR" ]; then
-    echo "❌ Diretório $SENHA_DIR não encontrado"
-    pause
-    return
+    log_err "Diretório não encontrado: $SENHA_DIR"
+    pause; return 1
   fi
-  
+
+  local total=0 erros=0
+
   echo "[" > "$OUTPUT_JSON"
-  first=true
-  
+  local first=true
+
   while read -r username limit; do
-      [[ -z "$username" || -z "$limit" ]] && continue
-      
-      # Senha
-      pass_file="${SENHA_DIR}/${username}"
-      if [[ -f "$pass_file" ]]; then
-          password=$(cat "$pass_file")
-      else
-          password=""
-      fi
-      
-      # Expiração (chage)
-      expire_raw=$(chage -l "$username" 2>/dev/null | grep "Account expires" || true)
-      expire_text=$(echo "$expire_raw" | cut -d: -f2- | xargs)
-      
-      # Converte para formato SQL datetime
-      if [[ -z "$expire_text" || "$expire_text" == "never" || "$expire_text" == "never." ]]; then
-          expire_sql=""
-      else
-          expire_sql=$(date -d "$expire_text" +"%Y-%m-%d 00:53:13" 2>/dev/null || true)
-      fi
-      
-      [[ -z "$expire_sql" ]] && expire_sql=""
-      
-      if [ "$first" = true ]; then
-          first=false
-      else
-          echo "," >> "$OUTPUT_JSON"
-      fi
-      
-      cat >> "$OUTPUT_JSON" <<EOF
+    [[ -z "$username" || -z "$limit" ]] && continue
+
+    log_step "Processando usuário: $username"
+
+    # Senha
+    local pass_file="${SENHA_DIR}/${username}"
+    local password=""
+    if [ -f "$pass_file" ]; then
+      password=$(cat "$pass_file")
+    else
+      log_warn "Senha não encontrada para: $username"
+      (( erros++ ))
+    fi
+
+    # Expiração via chage
+    local expire_raw expire_text expire_sql=""
+    expire_raw=$(chage -l "$username" 2>/dev/null | grep "Account expires" || true)
+    expire_text=$(echo "$expire_raw" | cut -d: -f2- | xargs)
+
+    if [[ -z "$expire_text" || "$expire_text" == "never" || "$expire_text" == "never." ]]; then
+      expire_sql=""
+    else
+      expire_sql=$(date -d "$expire_text" +"%Y-%m-%d 00:00:00" 2>/dev/null || true)
+    fi
+
+    [ "$first" = true ] && first=false || echo "," >> "$OUTPUT_JSON"
+
+    cat >> "$OUTPUT_JSON" <<EOF
   {
     "username": "$username",
     "limit": $limit,
@@ -90,88 +122,225 @@ gerar_json() {
     "expires": "$expire_sql"
   }
 EOF
+    (( total++ ))
   done < "$USERS_DB"
-  
+
   echo "]" >> "$OUTPUT_JSON"
-  
-  echo
-  echo "✅ JSON gerado com sucesso:"
-  echo "   $OUTPUT_JSON"
+
+  separator
+  log_ok "JSON gerado com sucesso!"
+  log_info "Total de usuários : $total"
+  [ "$erros" -gt 0 ] && log_warn "Senhas ausentes   : $erros"
+  log_info "Arquivo           : $OUTPUT_JSON"
   pause
 }
 
-# --------- ação 2: atualizar sistema ----------
 atualizar_sistema() {
   need_root
-  echo "🚀 Atualizando/Baixando ${APP}"
   echo
-  
-  command -v curl >/dev/null || {
-    echo "❌ curl não encontrado"
-    pause
-    return
-  }
-  
-  apt install -y screen >/dev/null 2>&1 || true
-  
-  echo "🔪 Verificando portas 80 e 7300..."
-  sudo systemctl stop checkuser
+  echo -e "${CYAN}  ╔══════════════════════════════════════════╗${NC}"
+  echo -e "${CYAN}  ║${WHITE}    Instalar / Atualizar / Reinstalar     ${CYAN}║${NC}"
+  echo -e "${CYAN}  ║${WHITE}              ${APP}                  ${CYAN}║${NC}"
+  echo -e "${CYAN}  ╚══════════════════════════════════════════╝${NC}"
+  echo
+
+  if ! command -v curl >/dev/null 2>&1; then
+    log_err "curl não encontrado. Instale com: apt install curl"
+    pause; return 1
+  fi
+
+  log_step "Verificando dependência: screen"
+  if ! command -v screen >/dev/null 2>&1; then
+    log_info "Instalando screen..."
+    apt install -y screen >/dev/null 2>&1 && log_ok "screen instalado." || log_warn "Falha ao instalar screen."
+  else
+    log_ok "screen já instalado."
+  fi
+
+  separator
+
+  log_step "Removendo serviço: ${CHECKUSER_SERVICE}"
+
+  if systemctl is-active --quiet "$CHECKUSER_SERVICE" 2>/dev/null; then
+    systemctl stop "$CHECKUSER_SERVICE" 2>/dev/null \
+      && log_ok "Serviço ${CHECKUSER_SERVICE} parado." \
+      || log_warn "Não foi possível parar ${CHECKUSER_SERVICE}."
+  else
+    log_warn "Serviço ${CHECKUSER_SERVICE} já estava inativo."
+  fi
+
+  if systemctl is-enabled --quiet "$CHECKUSER_SERVICE" 2>/dev/null; then
+    systemctl disable "$CHECKUSER_SERVICE" 2>/dev/null \
+      && log_ok "Serviço ${CHECKUSER_SERVICE} desabilitado." \
+      || log_warn "Não foi possível desabilitar ${CHECKUSER_SERVICE}."
+  else
+    log_warn "Serviço ${CHECKUSER_SERVICE} já estava desabilitado."
+  fi
+
+  if [ -f "$CHECKUSER_FILE" ]; then
+    rm -f "$CHECKUSER_FILE" \
+      && log_ok "Arquivo de serviço removido: $CHECKUSER_FILE" \
+      || log_err "Falha ao remover: $CHECKUSER_FILE"
+  else
+    log_warn "Arquivo não encontrado: $CHECKUSER_FILE"
+  fi
+
+  if [ -f "$CHECKUSER_BIN" ]; then
+    rm -f "$CHECKUSER_BIN" \
+      && log_ok "Binário removido: $CHECKUSER_BIN" \
+      || log_err "Falha ao remover: $CHECKUSER_BIN"
+  else
+    log_warn "Binário não encontrado: $CHECKUSER_BIN"
+  fi
+
+  log_step "Recarregando systemd daemon..."
+  systemctl daemon-reload \
+    && log_ok "Daemon recarregado." \
+    || log_err "Falha ao recarregar daemon."
+
+  separator
+
+  # ── Liberar portas 80 e 7300 ─────────────
+  log_step "Verificando portas 80 e 7300..."
   for PORT in 80 7300; do
-    PID=$(lsof -t -i:$PORT 2>/dev/null || true)
+    local PID
+    PID=$(lsof -t -i:"$PORT" 2>/dev/null || true)
     if [ -n "$PID" ]; then
-      echo "   Matando processo(s) na porta $PORT (PID: $PID)"
-      kill -9 $PID 2>/dev/null || true
+      log_warn "Porta $PORT em uso (PID: $PID) — finalizando processo..."
+      kill -9 "$PID" 2>/dev/null && log_ok "Processo finalizado na porta $PORT." \
+        || log_err "Falha ao finalizar processo na porta $PORT."
     else
-      echo "   Porta $PORT livre"
+      log_ok "Porta $PORT livre."
     fi
   done
-  
+
   sleep 1
-  
-  echo "⬇️ Baixando binário..."
-  curl -fsSL "$BIN_URL" -o "$BIN_PATH"
-  
-  echo "🔐 Ajustando permissões..."
+  separator
+
+  # ── Download do binário ───────────────────
+  log_step "Baixando binário de: $BIN_URL"
+  if curl -fsSL "$BIN_URL" -o "$BIN_PATH"; then
+    log_ok "Download concluído: $BIN_PATH"
+  else
+    log_err "Falha no download. Verifique a URL ou conexão."
+    pause; return 1
+  fi
+
   chmod +x "$BIN_PATH"
-  
+  log_ok "Permissões ajustadas: +x"
+
+  separator
+
   echo
-  echo "✅ Atualização concluída!"
+  echo -e "${GREEN}  ╔══════════════════════════════════════════╗${NC}"
+  echo -e "${GREEN}  ║        ✔  Instalação Concluída!          ║${NC}"
+  echo -e "${GREEN}  ╚══════════════════════════════════════════╝${NC}"
   echo
-  echo "▶️ Para executar e configurar pela CLI:"
-  echo "   ${APP}"
-  echo "🔑  Usuário de login:admin"
-  echo "🔐  Senha Usuário de login:admin123"
+  echo -e "${WHITE}  ▸ Para iniciar e configurar via CLI:${NC}"
+  echo -e "    ${YELLOW}${APP}${NC}"
   echo
-  echo "🛣️  Rotas"
-  echo "🌐 IP:81"
-  echo "🌐 IP:81/clientes"
-  echo "🌐 IP:81/revenda"
+  echo -e "${WHITE}  ▸ Credenciais padrão de acesso:${NC}"
+  echo -e "    ${CYAN}Usuário : ${WHITE}admin${NC}"
+  echo -e "    ${CYAN}Senha   : ${WHITE}admin123${NC}"
   echo
-  echo "ℹ️ A configuração é feita DIRETAMENTE NA CLI"
-  echo "   Nenhum arquivo foi criado"
+  echo -e "${WHITE}  ▸ Rotas disponíveis:${NC}"
+  echo -e "    ${CYAN}🌐  http://<SEU-IP>:81${NC}"
+  echo -e "    ${CYAN}🌐  http://<SEU-IP>:81/clientes${NC}"
+  echo -e "    ${CYAN}🌐  http://<SEU-IP>:81/revenda${NC}"
+  echo
+  echo -e "  ${YELLOW}ℹ  A configuração é feita diretamente na CLI.${NC}"
+  echo -e "  ${YELLOW}ℹ  Nenhum arquivo de config foi criado.${NC}"
+  echo
+
   pause
 }
 
-# --------- menu ----------
+remover_checkuser() {
+  need_root
+  echo
+  echo -e "${CYAN}  ╔══════════════════════════════════════════╗${NC}"
+  echo -e "${CYAN}  ║${WHITE}      Remoção do Serviço: checkuser       ${CYAN}║${NC}"
+  echo -e "${CYAN}  ╚══════════════════════════════════════════╝${NC}"
+  echo
+
+  log_step "Parando serviço..."
+  if systemctl is-active --quiet "$CHECKUSER_SERVICE" 2>/dev/null; then
+    systemctl stop "$CHECKUSER_SERVICE" \
+      && log_ok "Serviço parado." \
+      || log_err "Falha ao parar o serviço."
+  else
+    log_warn "Serviço já estava inativo."
+  fi
+
+  log_step "Desabilitando serviço..."
+  if systemctl is-enabled --quiet "$CHECKUSER_SERVICE" 2>/dev/null; then
+    systemctl disable "$CHECKUSER_SERVICE" \
+      && log_ok "Serviço desabilitado." \
+      || log_err "Falha ao desabilitar."
+  else
+    log_warn "Serviço já estava desabilitado."
+  fi
+
+  log_step "Removendo arquivo de serviço..."
+  if [ -f "$CHECKUSER_FILE" ]; then
+    rm -f "$CHECKUSER_FILE" \
+      && log_ok "Removido: $CHECKUSER_FILE" \
+      || log_err "Falha: $CHECKUSER_FILE"
+  else
+    log_warn "Não encontrado: $CHECKUSER_FILE"
+  fi
+
+  log_step "Removendo binário..."
+  if [ -f "$CHECKUSER_BIN" ]; then
+    rm -f "$CHECKUSER_BIN" \
+      && log_ok "Removido: $CHECKUSER_BIN" \
+      || log_err "Falha: $CHECKUSER_BIN"
+  else
+    log_warn "Não encontrado: $CHECKUSER_BIN"
+  fi
+
+  log_step "Recarregando daemon..."
+  systemctl daemon-reload \
+    && log_ok "Daemon recarregado." \
+    || log_err "Falha ao recarregar daemon."
+
+  separator
+  log_ok "Remoção do checkuser concluída!"
+  pause
+}
+
 menu() {
   banner
-  echo "Escolha uma opção:"
+  echo -e "  ${WHITE}Escolha uma opção:${NC}"
   echo
-  echo " 1) 🔄 Gerar arquivo de sincronização (SSHPlus)"
-  echo " 2) ⬆️  Instalar /Atualizar / Reinstalar wssh-vpn"
-  echo " 0) ❌ Sair"
+  echo -e "  ${GREEN}1)${NC}  🔄  Gerar arquivo de sincronização (SSHPlus)"
+  echo -e "  ${GREEN}2)${NC}  ⬆️   Instalar / Atualizar / Reinstalar wssh-vpn"
+  echo -e "  ${GREEN}3)${NC}  🗑️   Remover serviço checkuser"
+  echo -e "  ${RED}0)${NC}  ❌  Sair"
   echo
-  read -rp "Opção: " op </dev/tty
-  
+  separator
+  read -rp "  Opção: " op </dev/tty
+  echo
+
   case "$op" in
     1) gerar_json ;;
     2) atualizar_sistema ;;
-    0) exit 0 ;;
-    *) echo "Opção inválida"; pause ;;
+    3) remover_checkuser ;;
+    0)
+      echo -e "${CYAN}  Até logo!${NC}"
+      echo
+      exit 0
+      ;;
+    *)
+      log_warn "Opção inválida: '$op'"
+      pause
+      ;;
   esac
 }
 
-# --------- loop principal ----------
+need_root
+touch "$LOG_FILE" 2>/dev/null || true
+
 while true; do
   menu
 done
