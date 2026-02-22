@@ -202,7 +202,7 @@ atualizar_sistema() {
 
   # ── Liberar portas 80 e 7300 ─────────────
   log_step "Verificando portas 80 e 7300..."
-  for PORT in 80 7300; do
+  for PORT in 80 81 443 7300; do
     local PID
     PID=$(lsof -t -i:"$PORT" 2>/dev/null || true)
     if [ -n "$PID" ]; then
@@ -248,7 +248,7 @@ atualizar_sistema() {
   echo -e "    ${CYAN}🌐  http://<SEU-IP>:81/clientes${NC}"
   echo -e "    ${CYAN}🌐  http://<SEU-IP>:81/revenda${NC}"
   echo
-  echo -e "  ${YELLOW}ℹ  A configuração é feita diretamente na CLI.${NC}"
+  echo -e "  ${YELLOW}ℹ  A configuração é feita diretamente na dashboard.${NC}"
   echo -e "  ${YELLOW}ℹ  Nenhum arquivo de config foi criado.${NC}"
   echo
 
