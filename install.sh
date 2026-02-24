@@ -21,6 +21,8 @@ OUTPUT_JSON="/root/usuarios_export.json"
 APP="wssh-vpn"
 BIN_URL="https://github.com/MTplusWebSystem/wssh-vpn/raw/refs/heads/main/wssh-vpn-linux-amd64"
 BIN_PATH="/usr/local/bin/${APP}"
+DECRYPT_URL="https://github.com/MTplusWebSystem/wssh-vpn/raw/refs/heads/main/decrypt_backup"
+DECRYPT_PATH="/usr/local/bin/decrypt_backup"
 CHECKUSER_SERVICE="checkuser"
 CHECKUSER_FILE="/etc/systemd/system/${CHECKUSER_SERVICE}.service"
 CHECKUSER_BIN="/usr/local/bin/${CHECKUSER_SERVICE}"
@@ -70,7 +72,6 @@ gerar_json() {
   log_info "Saída JSON     : $OUTPUT_JSON"
   separator
 
-  # Verificações
   if [ ! -f "$USERS_DB" ]; then
     log_err "Arquivo não encontrado: $USERS_DB"
     pause; return 1
@@ -91,7 +92,6 @@ gerar_json() {
 
     log_step "Processando usuário: $username"
 
-    # Senha
     local pass_file="${SENHA_DIR}/${username}"
     local password=""
     if [ -f "$pass_file" ]; then
@@ -101,7 +101,6 @@ gerar_json() {
       (( erros++ ))
     fi
 
-    # Expiração via chage
     local expire_raw expire_text expire_sql=""
     expire_raw=$(chage -l "$username" 2>/dev/null | grep "Account expires" || true)
     expire_text=$(echo "$expire_raw" | cut -d: -f2- | xargs)
@@ -200,8 +199,7 @@ atualizar_sistema() {
 
   separator
 
-  # ── Liberar portas 80 e 7300 ─────────────
-  log_step "Verificando portas 80 e 7300..."
+  log_step "Verificando portas 80, 81, 443 e 7300..."
   for PORT in 80 81 443 7300; do
     local PID
     PID=$(lsof -t -i:"$PORT" 2>/dev/null || true)
@@ -217,17 +215,26 @@ atualizar_sistema() {
   sleep 1
   separator
 
-  # ── Download do binário ───────────────────
-  log_step "Baixando binário de: $BIN_URL"
+  # ── Download do binário principal ────────────────────────
+  log_step "Baixando wssh-vpn de: $BIN_URL"
   if curl -fsSL "$BIN_URL" -o "$BIN_PATH"; then
-    log_ok "Download concluído: $BIN_PATH"
+    chmod +x "$BIN_PATH"
+    log_ok "wssh-vpn instalado: $BIN_PATH"
   else
-    log_err "Falha no download. Verifique a URL ou conexão."
+    log_err "Falha no download do wssh-vpn. Verifique a URL ou conexão."
     pause; return 1
   fi
 
-  chmod +x "$BIN_PATH"
-  log_ok "Permissões ajustadas: +x"
+  separator
+
+  # ── Download do decrypt_backup ────────────────────────────
+  log_step "Baixando decrypt_backup de: $DECRYPT_URL"
+  if curl -fsSL "$DECRYPT_URL" -o "$DECRYPT_PATH"; then
+    chmod +x "$DECRYPT_PATH"
+    log_ok "decrypt_backup instalado: $DECRYPT_PATH"
+  else
+    log_warn "Falha no download do decrypt_backup (não crítico)."
+  fi
 
   separator
 
@@ -247,6 +254,9 @@ atualizar_sistema() {
   echo -e "    ${CYAN}🌐  http://<SEU-IP>:81${NC}"
   echo -e "    ${CYAN}🌐  http://<SEU-IP>:81/clientes${NC}"
   echo -e "    ${CYAN}🌐  http://<SEU-IP>:81/revenda${NC}"
+  echo
+  echo -e "${WHITE}  ▸ Restaurar backup:${NC}"
+  echo -e "    ${CYAN}decrypt_backup <arquivo.db.enc> <senha>${NC}"
   echo
   echo -e "  ${YELLOW}ℹ  A configuração é feita diretamente na dashboard.${NC}"
   echo -e "  ${YELLOW}ℹ  Nenhum arquivo de config foi criado.${NC}"
