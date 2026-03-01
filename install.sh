@@ -215,6 +215,47 @@ atualizar_sistema() {
   sleep 1
   separator
 
+  # ── Remoção do stunnel4 / stunnel5 ───────────────────────
+  log_step "Verificando e removendo stunnel4/5..."
+
+  for STUN_SVC in stunnel4 stunnel5; do
+    if systemctl is-active --quiet "$STUN_SVC" 2>/dev/null; then
+      systemctl stop "$STUN_SVC" 2>/dev/null \
+        && log_ok "Serviço $STUN_SVC parado." \
+        || log_warn "Não foi possível parar $STUN_SVC."
+    fi
+    if systemctl is-enabled --quiet "$STUN_SVC" 2>/dev/null; then
+      systemctl disable "$STUN_SVC" 2>/dev/null \
+        && log_ok "Serviço $STUN_SVC desabilitado." \
+        || log_warn "Não foi possível desabilitar $STUN_SVC."
+    fi
+  done
+
+  if command -v stunnel4 >/dev/null 2>&1 || command -v stunnel5 >/dev/null 2>&1 \
+      || dpkg -l stunnel4 2>/dev/null | grep -q '^ii' \
+      || dpkg -l stunnel5 2>/dev/null | grep -q '^ii'; then
+    log_info "Removendo pacotes stunnel4/5 via apt..."
+    apt-get remove --purge -y stunnel4 stunnel5 2>/dev/null \
+      && log_ok "stunnel4/5 removido com sucesso." \
+      || log_warn "Falha ao remover via apt (pode já estar ausente)."
+    apt-get autoremove -y 2>/dev/null || true
+  else
+    log_warn "stunnel4/5 não encontrado — nada a remover."
+  fi
+
+  for STUN_PROC in stunnel stunnel4 stunnel5; do
+    local STUN_PID
+    STUN_PID=$(pgrep -x "$STUN_PROC" 2>/dev/null || true)
+    if [ -n "$STUN_PID" ]; then
+      kill -9 "$STUN_PID" 2>/dev/null \
+        && log_ok "Processo residual $STUN_PROC (PID: $STUN_PID) encerrado." \
+        || log_warn "Não foi possível encerrar $STUN_PROC."
+    fi
+  done
+
+  sleep 1
+  separator
+
   # ── Download do binário principal ────────────────────────
   log_step "Baixando wssh-vpn de: $BIN_URL"
   if curl -fsSL "$BIN_URL" -o "$BIN_PATH"; then
