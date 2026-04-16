@@ -1,397 +1,162 @@
 #!/bin/bash
-
-# ══════════════════════════════════════════════════════════════
-#   WSSH-VPN • MENU DE MANUTENÇÃO / SINCRONIZAÇÃO
-#   Compatível: SSHPlus
-#   Versão: 2.0
-# ══════════════════════════════════════════════════════════════
+set -e
+export DEBIAN_FRONTEND=noninteractive
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
+BLUE='\033[0;34m'
 YELLOW='\033[1;33m'
 CYAN='\033[0;36m'
-BLUE='\033[0;34m'
-MAGENTA='\033[0;35m'
-WHITE='\033[1;37m'
 NC='\033[0m'
 
-USERS_DB="/root/usuarios.db"
-SENHA_DIR="/etc/SSHPlus/senha"
-OUTPUT_JSON="/root/usuarios_export.json"
-APP="wssh-vpn"
-BIN_URL="https://github.com/MTplusWebSystem/wssh-vpn/raw/refs/heads/main/wssh-vpn-linux-amd64"
-BIN_PATH="/usr/local/bin/${APP}"
-DECRYPT_URL="https://github.com/MTplusWebSystem/wssh-vpn/raw/refs/heads/main/decrypt_backup"
-DECRYPT_PATH="/usr/local/bin/decrypt_backup"
-CHECKUSER_SERVICE="checkuser"
-CHECKUSER_FILE="/etc/systemd/system/${CHECKUSER_SERVICE}.service"
-CHECKUSER_BIN="/usr/local/bin/${CHECKUSER_SERVICE}"
-LOG_FILE="/var/log/wssh-vpn-manutencao.log"
+clear
+echo -e "${CYAN}╔═══════════════════════════════════════════════════════════╗${NC}"
+echo -e "${CYAN}║              WSSH-VPN — SETUP DE INSTALAÇÃO               ║${NC}"
+echo -e "${CYAN}╚═══════════════════════════════════════════════════════════╝${NC}"
+echo ""
 
-log_ok()     { echo -e "${GREEN}  ✔  $1${NC}";             _log "OK"    "$1"; }
-log_warn()   { echo -e "${YELLOW}  ⚠  $1${NC}";            _log "WARN"  "$1"; }
-log_err()    { echo -e "${RED}  ✘  $1${NC}";               _log "ERROR" "$1"; }
-log_info()   { echo -e "${CYAN}  ➤  $1${NC}";              _log "INFO"  "$1"; }
-log_step()   { echo -e "${MAGENTA}  ▸  $1${NC}";           _log "STEP"  "$1"; }
-_log()       { echo "[$(date '+%Y-%m-%d %H:%M:%S')] [$1] $2" >> "$LOG_FILE"; }
+DB_NAME="wssh_db"
 
-separator()  { echo -e "${BLUE}  ────────────────────────────────────────${NC}"; }
+echo -e "${GREEN}[?] Parâmetros de Banco de Dados${NC}"
+read -p "    Usuário [wssh_user]: " DB_USER
+DB_USER=${DB_USER:-wssh_user}
 
-pause() {
-  echo
-  read -rp "  Pressione ENTER para continuar..." </dev/tty
+read -s -p "    Senha [senha123]: " DB_PASS
+echo ""
+DB_PASS=${DB_PASS:-senha123}
+echo ""
+
+echo -e "${GREEN}[?] Parâmetros do Painel Administrativo${NC}"
+read -p "    Usuário Admin [admin]: " PANEL_USER
+PANEL_USER=${PANEL_USER:-admin}
+
+read -s -p "    Senha Admin [admin123]: " PANEL_PASS
+echo ""
+PANEL_PASS=${PANEL_PASS:-admin123}
+echo ""
+
+echo -e "${CYAN}⇨ Iniciando deployment da infraestrutura...${NC}\n"
+
+echo -e "${YELLOW}[1/6] Realizando limpeza de cache de sistema...${NC}"
+systemctl stop wssh-vpn 2>/dev/null || true
+systemctl disable wssh-vpn 2>/dev/null || true
+rm -f /etc/systemd/system/wssh-vpn.service
+systemctl daemon-reload
+
+PIDS=$(pgrep -x wssh-vpn 2>/dev/null || true)
+if [ -n "$PIDS" ]; then
+  kill $PIDS 2>/dev/null || true
+  sleep 2
+  PIDS=$(pgrep -x wssh-vpn 2>/dev/null || true)
+  if [ -n "$PIDS" ]; then
+    kill -9 $PIDS 2>/dev/null || true
+  fi
+fi
+rm -f /usr/local/bin/wssh-vpn
+
+echo -e "${YELLOW}[2/6] Otimizando PostgreSQL e estruturando Database...${NC}"
+if ! command -v psql &>/dev/null; then
+  apt-get update -qq >/dev/null 2>&1
+  apt-get install -y -qq postgresql postgresql-contrib >/dev/null 2>&1
+fi
+
+systemctl enable postgresql >/dev/null 2>&1 || true
+systemctl start postgresql >/dev/null 2>&1 || true
+sleep 2
+
+sudo -u postgres psql -c "CREATE USER $DB_USER SUPERUSER PASSWORD '$DB_PASS';" >/dev/null 2>&1 || \
+sudo -u postgres psql -c "ALTER USER $DB_USER SUPERUSER PASSWORD '$DB_PASS';" >/dev/null 2>&1 || true
+
+sudo -u postgres psql -c "DROP DATABASE IF EXISTS $DB_NAME;" >/dev/null 2>&1 || true
+sudo -u postgres psql -c "CREATE DATABASE $DB_NAME OWNER $DB_USER;" >/dev/null 2>&1 || true
+sudo -u postgres psql -c "GRANT ALL PRIVILEGES ON DATABASE $DB_NAME TO $DB_USER;" >/dev/null 2>&1 || true
+sudo -u postgres psql -c "ALTER DATABASE $DB_NAME OWNER TO $DB_USER;" >/dev/null 2>&1 || true
+systemctl restart postgresql >/dev/null 2>&1 || true
+
+if ! command -v jq &>/dev/null; then
+  apt-get install -y -qq jq >/dev/null 2>&1
+fi
+
+echo -e "${YELLOW}[3/6] Arquitetando injeções de diretório JSON...${NC}"
+mkdir -p /etc/wssh
+
+if [ ! -f /etc/wssh/config.json ]; then
+  echo "{}" > /etc/wssh/config.json
+fi
+
+DB_USER_B64=$(echo -n "$DB_USER" | base64 -w 0)
+DB_PASS_B64=$(echo -n "$DB_PASS" | base64 -w 0)
+PANEL_USER_B64=$(echo -n "$PANEL_USER" | base64 -w 0)
+PANEL_PASS_B64=$(echo -n "$PANEL_PASS" | base64 -w 0)
+
+jq ".db_user_b64 = \"$DB_USER_B64\" | .db_pass_b64 = \"$DB_PASS_B64\" | .admin_user_b64 = \"$PANEL_USER_B64\" | .admin_pass_b64 = \"$PANEL_PASS_B64\"" /etc/wssh/config.json > /tmp/config.json.tmp && mv /tmp/config.json.tmp /etc/wssh/config.json
+
+if [ ! -f /etc/wssh/snapshot.json ]; then
+  HASH=$(echo -n "$DB_PASS" | sha256sum | awk '{print $1}')
+  cat <<SNAPSHOT > /etc/wssh/snapshot.json
+{
+  "db_user": "$DB_USER",
+  "db_pass_hash": "$HASH",
+  "created_at": "$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
 }
+SNAPSHOT
+fi
 
-need_root() {
-  if [ "$EUID" -ne 0 ]; then
-    echo -e "${RED}  ✘  Execute como root: sudo $0${NC}"
-    exit 1
+mkdir -p /etc/wssh/.license
+for OLD_DIR in ".license" "cmd/build/.license" "../.license"; do
+  if [ -d "$OLD_DIR" ] && [ -f "$OLD_DIR/uuid" ]; then
+    cp -a "$OLD_DIR"/* /etc/wssh/.license/
+    break
   fi
-}
-
-banner() {
-  clear
-  echo
-  echo -e "${CYAN}  ╔══════════════════════════════════════════╗${NC}"
-  echo -e "${CYAN}  ║${WHITE}      WSSH-VPN • MENU DE MANUTENÇÃO       ${CYAN}║${NC}"
-  echo -e "${CYAN}  ║${WHITE}      Compatível: SSHPlus  │  v2.0        ${CYAN}║${NC}"
-  echo -e "${CYAN}  ╚══════════════════════════════════════════╝${NC}"
-  echo -e "  ${YELLOW}Log: ${LOG_FILE}${NC}"
-  echo
-}
-
-gerar_json() {
-  need_root
-  echo
-  echo -e "${CYAN}  ╔══════════════════════════════════════════╗${NC}"
-  echo -e "${CYAN}  ║${WHITE}     Gerar Arquivo de Sincronização       ${CYAN}║${NC}"
-  echo -e "${CYAN}  ╚══════════════════════════════════════════╝${NC}"
-  echo
-  log_info "Banco de dados : $USERS_DB"
-  log_info "Dir. de senhas : $SENHA_DIR"
-  log_info "Saída JSON     : $OUTPUT_JSON"
-  separator
-
-  if [ ! -f "$USERS_DB" ]; then
-    log_err "Arquivo não encontrado: $USERS_DB"
-    pause; return 1
-  fi
-
-  if [ ! -d "$SENHA_DIR" ]; then
-    log_err "Diretório não encontrado: $SENHA_DIR"
-    pause; return 1
-  fi
-
-  local total=0 erros=0
-
-  echo "[" > "$OUTPUT_JSON"
-  local first=true
-
-  while read -r username limit; do
-    [[ -z "$username" || -z "$limit" ]] && continue
-
-    log_step "Processando usuário: $username"
-
-    local pass_file="${SENHA_DIR}/${username}"
-    local password=""
-    if [ -f "$pass_file" ]; then
-      password=$(cat "$pass_file")
-    else
-      log_warn "Senha não encontrada para: $username"
-      (( erros++ ))
-    fi
-
-    local expire_raw expire_text expire_sql=""
-    expire_raw=$(chage -l "$username" 2>/dev/null | grep "Account expires" || true)
-    expire_text=$(echo "$expire_raw" | cut -d: -f2- | xargs)
-
-    if [[ -z "$expire_text" || "$expire_text" == "never" || "$expire_text" == "never." ]]; then
-      expire_sql=""
-    else
-      expire_sql=$(date -d "$expire_text" +"%Y-%m-%d 00:00:00" 2>/dev/null || true)
-    fi
-
-    [ "$first" = true ] && first=false || echo "," >> "$OUTPUT_JSON"
-
-    cat >> "$OUTPUT_JSON" <<EOF
-  {
-    "username": "$username",
-    "limit": $limit,
-    "password": "$password",
-    "expires": "$expire_sql"
-  }
-EOF
-    (( total++ ))
-  done < "$USERS_DB"
-
-  echo "]" >> "$OUTPUT_JSON"
-
-  separator
-  log_ok "JSON gerado com sucesso!"
-  log_info "Total de usuários : $total"
-  [ "$erros" -gt 0 ] && log_warn "Senhas ausentes   : $erros"
-  log_info "Arquivo           : $OUTPUT_JSON"
-  pause
-}
-
-atualizar_sistema() {
-  need_root
-  echo
-  echo -e "${CYAN}  ╔══════════════════════════════════════════╗${NC}"
-  echo -e "${CYAN}  ║${WHITE}    Instalar / Atualizar / Reinstalar     ${CYAN}║${NC}"
-  echo -e "${CYAN}  ║${WHITE}              ${APP}                  ${CYAN}║${NC}"
-  echo -e "${CYAN}  ╚══════════════════════════════════════════╝${NC}"
-  echo
-
-  if ! command -v curl >/dev/null 2>&1; then
-    log_err "curl não encontrado. Instale com: apt install curl"
-    pause; return 1
-  fi
-
-  log_step "Verificando dependência: screen"
-  if ! command -v screen >/dev/null 2>&1; then
-    log_info "Instalando screen..."
-    apt install -y screen >/dev/null 2>&1 && log_ok "screen instalado." || log_warn "Falha ao instalar screen."
-  else
-    log_ok "screen já instalado."
-  fi
-
-  separator
-
-  log_step "Removendo serviço: ${CHECKUSER_SERVICE}"
-
-  if systemctl is-active --quiet "$CHECKUSER_SERVICE" 2>/dev/null; then
-    systemctl stop "$CHECKUSER_SERVICE" 2>/dev/null \
-      && log_ok "Serviço ${CHECKUSER_SERVICE} parado." \
-      || log_warn "Não foi possível parar ${CHECKUSER_SERVICE}."
-  else
-    log_warn "Serviço ${CHECKUSER_SERVICE} já estava inativo."
-  fi
-
-  if systemctl is-enabled --quiet "$CHECKUSER_SERVICE" 2>/dev/null; then
-    systemctl disable "$CHECKUSER_SERVICE" 2>/dev/null \
-      && log_ok "Serviço ${CHECKUSER_SERVICE} desabilitado." \
-      || log_warn "Não foi possível desabilitar ${CHECKUSER_SERVICE}."
-  else
-    log_warn "Serviço ${CHECKUSER_SERVICE} já estava desabilitado."
-  fi
-
-  if [ -f "$CHECKUSER_FILE" ]; then
-    rm -f "$CHECKUSER_FILE" \
-      && log_ok "Arquivo de serviço removido: $CHECKUSER_FILE" \
-      || log_err "Falha ao remover: $CHECKUSER_FILE"
-  else
-    log_warn "Arquivo não encontrado: $CHECKUSER_FILE"
-  fi
-
-  if [ -f "$CHECKUSER_BIN" ]; then
-    rm -f "$CHECKUSER_BIN" \
-      && log_ok "Binário removido: $CHECKUSER_BIN" \
-      || log_err "Falha ao remover: $CHECKUSER_BIN"
-  else
-    log_warn "Binário não encontrado: $CHECKUSER_BIN"
-  fi
-
-  log_step "Recarregando systemd daemon..."
-  systemctl daemon-reload \
-    && log_ok "Daemon recarregado." \
-    || log_err "Falha ao recarregar daemon."
-
-  separator
-
-  log_step "Verificando portas 80, 81, 443 e 7300..."
-  for PORT in 80 81 443 7300; do
-    local PID
-    PID=$(lsof -t -i:"$PORT" 2>/dev/null || true)
-    if [ -n "$PID" ]; then
-      log_warn "Porta $PORT em uso (PID: $PID) — finalizando processo..."
-      kill -9 "$PID" 2>/dev/null && log_ok "Processo finalizado na porta $PORT." \
-        || log_err "Falha ao finalizar processo na porta $PORT."
-    else
-      log_ok "Porta $PORT livre."
-    fi
-  done
-
-  sleep 1
-  separator
-
-  # ── Remoção do stunnel4 / stunnel5 ───────────────────────
-  log_step "Verificando e removendo stunnel4/5..."
-
-  for STUN_SVC in stunnel4 stunnel5; do
-    if systemctl is-active --quiet "$STUN_SVC" 2>/dev/null; then
-      systemctl stop "$STUN_SVC" 2>/dev/null \
-        && log_ok "Serviço $STUN_SVC parado." \
-        || log_warn "Não foi possível parar $STUN_SVC."
-    fi
-    if systemctl is-enabled --quiet "$STUN_SVC" 2>/dev/null; then
-      systemctl disable "$STUN_SVC" 2>/dev/null \
-        && log_ok "Serviço $STUN_SVC desabilitado." \
-        || log_warn "Não foi possível desabilitar $STUN_SVC."
-    fi
-  done
-
-  if command -v stunnel4 >/dev/null 2>&1 || command -v stunnel5 >/dev/null 2>&1 \
-      || dpkg -l stunnel4 2>/dev/null | grep -q '^ii' \
-      || dpkg -l stunnel5 2>/dev/null | grep -q '^ii'; then
-    log_info "Removendo pacotes stunnel4/5 via apt..."
-    apt-get remove --purge -y stunnel4 stunnel5 2>/dev/null \
-      && log_ok "stunnel4/5 removido com sucesso." \
-      || log_warn "Falha ao remover via apt (pode já estar ausente)."
-    apt-get autoremove -y 2>/dev/null || true
-  else
-    log_warn "stunnel4/5 não encontrado — nada a remover."
-  fi
-
-  for STUN_PROC in stunnel stunnel4 stunnel5; do
-    local STUN_PID
-    STUN_PID=$(pgrep -x "$STUN_PROC" 2>/dev/null || true)
-    if [ -n "$STUN_PID" ]; then
-      kill -9 "$STUN_PID" 2>/dev/null \
-        && log_ok "Processo residual $STUN_PROC (PID: $STUN_PID) encerrado." \
-        || log_warn "Não foi possível encerrar $STUN_PROC."
-    fi
-  done
-
-  sleep 1
-  separator
-
-  # ── Download do binário principal ────────────────────────
-  log_step "Baixando wssh-vpn de: $BIN_URL"
-  if curl -fsSL "$BIN_URL" -o "$BIN_PATH"; then
-    chmod +x "$BIN_PATH"
-    log_ok "wssh-vpn instalado: $BIN_PATH"
-  else
-    log_err "Falha no download do wssh-vpn. Verifique a URL ou conexão."
-    pause; return 1
-  fi
-
-  separator
-
-  # ── Download do decrypt_backup ────────────────────────────
-  log_step "Baixando decrypt_backup de: $DECRYPT_URL"
-  if curl -fsSL "$DECRYPT_URL" -o "$DECRYPT_PATH"; then
-    chmod +x "$DECRYPT_PATH"
-    log_ok "decrypt_backup instalado: $DECRYPT_PATH"
-  else
-    log_warn "Falha no download do decrypt_backup (não crítico)."
-  fi
-
-  separator
-
-  echo
-  echo -e "${GREEN}  ╔══════════════════════════════════════════╗${NC}"
-  echo -e "${GREEN}  ║        ✔  Instalação Concluída!          ║${NC}"
-  echo -e "${GREEN}  ╚══════════════════════════════════════════╝${NC}"
-  echo
-  echo -e "${WHITE}  ▸ Para iniciar e configurar via CLI:${NC}"
-  echo -e "    ${YELLOW}${APP}${NC}"
-  echo
-  echo -e "${WHITE}  ▸ Credenciais padrão de acesso:${NC}"
-  echo -e "    ${CYAN}Usuário : ${WHITE}admin${NC}"
-  echo -e "    ${CYAN}Senha   : ${WHITE}admin123${NC}"
-  echo
-  echo -e "${WHITE}  ▸ Rotas disponíveis:${NC}"
-  echo -e "    ${CYAN}🌐  http://<SEU-IP>:81${NC}"
-  echo -e "    ${CYAN}🌐  http://<SEU-IP>:81/clientes${NC}"
-  echo -e "    ${CYAN}🌐  http://<SEU-IP>:81/revenda${NC}"
-  echo
-  echo -e "${WHITE}  ▸ Restaurar backup:${NC}"
-  echo -e "    ${CYAN}decrypt_backup <arquivo.db.enc> <senha>${NC}"
-  echo
-  echo -e "  ${YELLOW}ℹ  A configuração é feita diretamente na dashboard.${NC}"
-  echo -e "  ${YELLOW}ℹ  Nenhum arquivo de config foi criado.${NC}"
-  echo
-
-  pause
-}
-
-remover_checkuser() {
-  need_root
-  echo
-  echo -e "${CYAN}  ╔══════════════════════════════════════════╗${NC}"
-  echo -e "${CYAN}  ║${WHITE}      Remoção do Serviço: checkuser       ${CYAN}║${NC}"
-  echo -e "${CYAN}  ╚══════════════════════════════════════════╝${NC}"
-  echo
-
-  log_step "Parando serviço..."
-  if systemctl is-active --quiet "$CHECKUSER_SERVICE" 2>/dev/null; then
-    systemctl stop "$CHECKUSER_SERVICE" \
-      && log_ok "Serviço parado." \
-      || log_err "Falha ao parar o serviço."
-  else
-    log_warn "Serviço já estava inativo."
-  fi
-
-  log_step "Desabilitando serviço..."
-  if systemctl is-enabled --quiet "$CHECKUSER_SERVICE" 2>/dev/null; then
-    systemctl disable "$CHECKUSER_SERVICE" \
-      && log_ok "Serviço desabilitado." \
-      || log_err "Falha ao desabilitar."
-  else
-    log_warn "Serviço já estava desabilitado."
-  fi
-
-  log_step "Removendo arquivo de serviço..."
-  if [ -f "$CHECKUSER_FILE" ]; then
-    rm -f "$CHECKUSER_FILE" \
-      && log_ok "Removido: $CHECKUSER_FILE" \
-      || log_err "Falha: $CHECKUSER_FILE"
-  else
-    log_warn "Não encontrado: $CHECKUSER_FILE"
-  fi
-
-  log_step "Removendo binário..."
-  if [ -f "$CHECKUSER_BIN" ]; then
-    rm -f "$CHECKUSER_BIN" \
-      && log_ok "Removido: $CHECKUSER_BIN" \
-      || log_err "Falha: $CHECKUSER_BIN"
-  else
-    log_warn "Não encontrado: $CHECKUSER_BIN"
-  fi
-
-  log_step "Recarregando daemon..."
-  systemctl daemon-reload \
-    && log_ok "Daemon recarregado." \
-    || log_err "Falha ao recarregar daemon."
-
-  separator
-  log_ok "Remoção do checkuser concluída!"
-  pause
-}
-
-menu() {
-  banner
-  echo -e "  ${WHITE}Escolha uma opção:${NC}"
-  echo
-  echo -e "  ${GREEN}1)${NC}  🔄  Gerar arquivo de sincronização (SSHPlus)"
-  echo -e "  ${GREEN}2)${NC}  ⬆️   Instalar / Atualizar / Reinstalar wssh-vpn"
-  echo -e "  ${GREEN}3)${NC}  🗑️   Remover serviço checkuser"
-  echo -e "  ${RED}0)${NC}  ❌  Sair"
-  echo
-  separator
-  read -rp "  Opção: " op </dev/tty
-  echo
-
-  case "$op" in
-    1) gerar_json ;;
-    2) atualizar_sistema ;;
-    3) remover_checkuser ;;
-    0)
-      echo -e "${CYAN}  Até logo!${NC}"
-      echo
-      exit 0
-      ;;
-    *)
-      log_warn "Opção inválida: '$op'"
-      pause
-      ;;
-  esac
-}
-
-need_root
-touch "$LOG_FILE" 2>/dev/null || true
-
-while true; do
-  menu
 done
+
+echo -e "${YELLOW}[4/6] Configurando binário do WSSH...${NC}"
+
+DOWNLOAD_SUCCESS=0
+for i in 1 2 3; do
+  if wget -qO /usr/local/bin/wssh-vpn.tmp https://install.mtwtech.shop/; then
+    if [ -s /usr/local/bin/wssh-vpn.tmp ]; then
+      mv /usr/local/bin/wssh-vpn.tmp /usr/local/bin/wssh-vpn
+      DOWNLOAD_SUCCESS=1
+      break
+    fi
+  fi
+  sleep 3
+done
+
+chmod +x /usr/local/bin/wssh-vpn 2>/dev/null || true
+
+echo -e "${YELLOW}[5/6] Formulando processos daemon...${NC}"
+cat <<EOF > /etc/systemd/system/wssh-vpn.service
+[Unit]
+Description=WSSH VPN Service
+After=network.target postgresql.service
+
+[Service]
+Type=simple
+WorkingDirectory=/etc/wssh
+Environment=DB_USER=$DB_USER
+Environment=DB_PASSWORD=$DB_PASS
+Environment=DB_NAME=$DB_NAME
+ExecStart=/usr/local/bin/wssh-vpn server
+Restart=on-failure
+RestartSec=3
+LimitNOFILE=1048576
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+echo -e "${YELLOW}[6/6] Aplicando unidades Systemd...${NC}"
+systemctl daemon-reload
+systemctl enable wssh-vpn >/dev/null 2>&1
+systemctl restart wssh-vpn >/dev/null 2>&1 || true
+
+echo ""
+echo -e "${CYAN}╔═══════════════════════════════════════════════════════════╗${NC}"
+echo -e "${CYAN}║  Instalação concluída com sucesso!                        ║${NC}"
+echo -e "${CYAN}╠═══════════════════════════════════════════════════════════╣${NC}"
+echo -e "${CYAN}║  Invoque o Menu CLI a qualquer hora digitando:            ║${NC}"
+echo -e "${CYAN}║  ${GREEN}wssh-vpn                                                 ${CYAN}║${NC}"
+echo -e "${CYAN}╚═══════════════════════════════════════════════════════════╝${NC}"
+echo ""
