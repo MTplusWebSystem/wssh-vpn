@@ -18,19 +18,19 @@ echo ""
 DB_NAME="wssh_db"
 
 echo -e "${GREEN}[?] Parâmetros de Banco de Dados${NC}"
-read -p "    Usuário [wssh_user]: " DB_USER
+read -p "    Usuário [wssh_user]: " DB_USER < /dev/tty
 DB_USER=${DB_USER:-wssh_user}
 
-read -s -p "    Senha [senha123]: " DB_PASS
+read -s -p "    Senha [senha123]: " DB_PASS < /dev/tty
 echo ""
 DB_PASS=${DB_PASS:-senha123}
 echo ""
 
 echo -e "${GREEN}[?] Parâmetros do Painel Administrativo${NC}"
-read -p "    Usuário Admin [admin]: " PANEL_USER
+read -p "    Usuário Admin [admin]: " PANEL_USER < /dev/tty
 PANEL_USER=${PANEL_USER:-admin}
 
-read -s -p "    Senha Admin [admin123]: " PANEL_PASS
+read -s -p "    Senha Admin [admin123]: " PANEL_PASS < /dev/tty
 echo ""
 PANEL_PASS=${PANEL_PASS:-admin123}
 echo ""
