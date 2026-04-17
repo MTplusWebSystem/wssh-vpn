@@ -18,19 +18,19 @@ echo ""
 DB_NAME="wssh_db"
 
 echo -e "${GREEN}[?] Parâmetros de Banco de Dados${NC}"
-read -p "    Usuário mínimo caracteres:6 " DB_USER < /dev/tty
+read -p "    Usuário mínimo 6 caracteres: " DB_USER < /dev/tty
 DB_USER=${DB_USER:-wssh_user}
 
-read -s -p "    Senha mínimo caracteres:8 " DB_PASS < /dev/tty
+read -s -p "    Senha mínimo 8 caracteres: " DB_PASS < /dev/tty
 echo ""
 DB_PASS=${DB_PASS:-senha123}
 echo ""
 
 echo -e "${GREEN}[?] Parâmetros do Painel Administrativo${NC}"
-read -p "    Usuário Admin mínimo caracteres:6 " PANEL_USER < /dev/tty
+read -p "    Usuário Admin mínimo 6 caracteres: " PANEL_USER < /dev/tty
 PANEL_USER=${PANEL_USER:-admin}
 
-read -s -p "    Senha Admin mínimo caracteres:8 " PANEL_PASS < /dev/tty
+read -s -p "    Senha Admin mínimo 8 caracteres: " PANEL_PASS < /dev/tty
 echo ""
 PANEL_PASS=${PANEL_PASS:-admin123}
 echo ""
@@ -124,6 +124,12 @@ for i in 1 2 3; do
   fi
   sleep 3
 done
+
+if [ "$DOWNLOAD_SUCCESS" -ne 1 ]; then
+  echo -e "${RED}[ERROR] Falha ao baixar o binário do WSSH-VPN de https://install.mtwtech.shop/${NC}"
+  echo -e "${RED}[ERROR] Instalação abortada para evitar corromper o sistema.${NC}"
+  exit 1
+fi
 
 chmod +x /usr/local/bin/wssh-vpn 2>/dev/null || true
 
