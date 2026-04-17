@@ -53,6 +53,7 @@ if [ -n "$PIDS" ]; then
   fi
 fi
 rm -f /usr/local/bin/wssh-vpn
+rm -f /usr/local/bin/wssh-vpn.bak
 
 echo -e "${YELLOW}[2/6] Otimizando PostgreSQL e estruturando Database...${NC}"
 if ! command -v psql &>/dev/null; then
