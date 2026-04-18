@@ -81,6 +81,10 @@ fi
 echo -e "${YELLOW}[3/6] Arquitetando injeções de diretório JSON...${NC}"
 mkdir -p /etc/wssh
 
+if [ ! -f /etc/wssh/ssh_host_key ]; then
+  ssh-keygen -q -t rsa -b 2048 -f /etc/wssh/ssh_host_key -N ""
+fi
+
 if [ ! -f /etc/wssh/config.json ]; then
   echo "{}" > /etc/wssh/config.json
 fi
