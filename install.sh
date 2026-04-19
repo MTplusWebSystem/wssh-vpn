@@ -15,6 +15,38 @@ echo -e "${CYAN}║              WSSH-VPN — SETUP DE INSTALAÇÃO             
 echo -e "${CYAN}╚═══════════════════════════════════════════════════════════╝${NC}"
 echo ""
 
+# ── Detecção de arquitetura ──────────────────────────────────────
+MACHINE=$(uname -m)
+OS=$(uname -s | tr '[:upper:]' '[:lower:]')
+
+case "$MACHINE" in
+  x86_64)             ARCH="amd64" ;;
+  i386|i686)          ARCH="386" ;;
+  aarch64|arm64)      ARCH="aarch64" ;;
+  armv7l|armv7)       ARCH="armv7" ;;
+  armv6l|armv6)       ARCH="armv6" ;;
+  armv5l|armv5tel)    ARCH="armv5" ;;
+  riscv64)            ARCH="riscv64" ;;
+  ppc64le)            ARCH="ppc64le" ;;
+  s390x)              ARCH="s390x" ;;
+  *)
+    echo -e "${RED}[ERROR] Arquitetura não suportada: $MACHINE${NC}"
+    exit 1
+    ;;
+esac
+
+# Android via Termux (root)
+if [ -d "/data/data/com.termux" ]; then
+  OS="android"
+fi
+
+BINARY_NAME="wssh-vpn_${OS}_${ARCH}"
+
+echo -e "${BLUE}[i] Sistema detectado: ${GREEN}${OS}/${ARCH}${NC}"
+echo -e "${BLUE}[i] Binário selecionado: ${GREEN}${BINARY_NAME}${NC}"
+echo ""
+# ────────────────────────────────────────────────────────────────
+
 DB_NAME="wssh_db"
 
 echo -e "${GREEN}[?] Parâmetros de Banco de Dados${NC}"
@@ -116,24 +148,40 @@ for OLD_DIR in ".license" "cmd/build/.license" "../.license"; do
 done
 
 echo -e "${YELLOW}[4/6] Configurando binário do WSSH...${NC}"
+echo -e "${BLUE}[i] Baixando pacote: https://install.mtwtech.shop/${NC}"
+echo -e "${BLUE}[i] Binário alvo: ${BINARY_NAME}${NC}"
 
 DOWNLOAD_SUCCESS=0
 for i in 1 2 3; do
-  if wget -qO /usr/local/bin/wssh-vpn.tmp https://install.mtwtech.shop/; then
-    if [ -s /usr/local/bin/wssh-vpn.tmp ]; then
-      mv /usr/local/bin/wssh-vpn.tmp /usr/local/bin/wssh-vpn
+  if wget -qO /tmp/wssh-vpn.tar.gz "https://install.mtwtech.shop/"; then
+    if [ -s /tmp/wssh-vpn.tar.gz ]; then
       DOWNLOAD_SUCCESS=1
       break
     fi
   fi
+  echo -e "${YELLOW}[!] Tentativa $i falhou, aguardando...${NC}"
   sleep 3
 done
 
 if [ "$DOWNLOAD_SUCCESS" -ne 1 ]; then
-  echo -e "${RED}[ERROR] Falha ao baixar o binário do WSSH-VPN de https://install.mtwtech.shop/${NC}"
+  echo -e "${RED}[ERROR] Falha ao baixar o pacote de https://install.mtwtech.shop/${NC}"
   echo -e "${RED}[ERROR] Instalação abortada para evitar corromper o sistema.${NC}"
   exit 1
 fi
+
+mkdir -p /tmp/wssh-extract
+tar -xzf /tmp/wssh-vpn.tar.gz -C /tmp/wssh-extract
+
+if [ ! -f "/tmp/wssh-extract/${BINARY_NAME}" ]; then
+  echo -e "${RED}[ERROR] Binário '${BINARY_NAME}' não encontrado no pacote.${NC}"
+  echo -e "${RED}[ERROR] Arquiteturas disponíveis no pacote:${NC}"
+  ls /tmp/wssh-extract/ | sed 's/^/    /'
+  rm -rf /tmp/wssh-vpn.tar.gz /tmp/wssh-extract
+  exit 1
+fi
+
+mv "/tmp/wssh-extract/${BINARY_NAME}" /usr/local/bin/wssh-vpn
+rm -rf /tmp/wssh-vpn.tar.gz /tmp/wssh-extract
 
 chmod +x /usr/local/bin/wssh-vpn 2>/dev/null || true
 
