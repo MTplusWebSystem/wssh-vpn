@@ -21,18 +21,12 @@ INSTALLED=0
 
 echo -e "${BLUE}Selecione uma opção:${NC}"
 echo ""
-if [ "$INSTALLED" -eq 1 ]; then
-  echo -e "  ${GREEN}[1]${NC} Atualizar sistema (mantém configurações)"
-  echo -e "  ${RED}[2]${NC} Desinstalar sistema"
-  echo -e "  ${YELLOW}[0]${NC} Cancelar"
-  echo ""
-  read -p "Opção: " MENU_OPT < /dev/tty
-else
-  echo -e "  ${GREEN}[1]${NC} Instalar sistema"
-  echo -e "  ${YELLOW}[0]${NC} Cancelar"
-  echo ""
-  read -p "Opção: " MENU_OPT < /dev/tty
-fi
+echo -e "  ${GREEN}[1]${NC} Instalar sistema"
+echo -e "  ${CYAN}[2]${NC} Atualizar sistema (mantém configurações)"
+echo -e "  ${RED}[3]${NC} Desinstalar sistema"
+echo -e "  ${YELLOW}[0]${NC} Cancelar"
+echo ""
+read -p "Opção: " MENU_OPT < /dev/tty
 
 echo ""
 
@@ -41,11 +35,8 @@ case "$MENU_OPT" in
     echo -e "${YELLOW}[!] Operação cancelada.${NC}"
     exit 0
     ;;
-  2)
-    if [ "$INSTALLED" -eq 0 ]; then
-      echo -e "${RED}[!] Opção inválida.${NC}"
-      exit 1
-    fi
+  3)
+    # ── DESINSTALAÇÃO ────────────────────────────────────────────
     # ── DESINSTALAÇÃO ────────────────────────────────────────────
     echo -e "${CYAN}╔═══════════════════════════════════════════════════════════╗${NC}"
     echo -e "${CYAN}║              WSSH-VPN — REMOÇÃO DO SISTEMA                ║${NC}"
@@ -114,24 +105,20 @@ case "$MENU_OPT" in
     exit 0
     ;;
   1)
-    # Continua para instalação/atualização abaixo
+    UPDATE_MODE=0
+    echo -e "${GREEN}[✓] Modo INSTALAÇÃO iniciado${NC}"
+    echo ""
+    ;;
+  2)
+    UPDATE_MODE=1
+    echo -e "${GREEN}[✓] Modo UPDATE ativado — configurações serão mantidas${NC}"
+    echo ""
     ;;
   *)
     echo -e "${RED}[!] Opção inválida.${NC}"
     exit 1
     ;;
 esac
-
-# ── MODO: INSTALL ou UPDATE ──────────────────────────────────────
-UPDATE_MODE=0
-[ "$INSTALLED" -eq 1 ] && UPDATE_MODE=1
-
-if [ "$UPDATE_MODE" -eq 1 ]; then
-  echo -e "${GREEN}[✓] Modo UPDATE ativado — configurações serão mantidas${NC}"
-else
-  echo -e "${GREEN}[✓] Modo INSTALAÇÃO iniciado${NC}"
-fi
-echo ""
 
 # ── DETECÇÃO DE ARQUITETURA ──────────────────────────────────────
 MACHINE=$(uname -m)
