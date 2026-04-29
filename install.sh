@@ -15,7 +15,6 @@ echo -e "${CYAN}║              WSSH-VPN — SETUP DE INSTALAÇÃO             
 echo -e "${CYAN}╚═══════════════════════════════════════════════════════════╝${NC}"
 echo ""
 
-# ── Detecção de arquitetura ──────────────────────────────────────
 MACHINE=$(uname -m)
 OS=$(uname -s | tr '[:upper:]' '[:lower:]')
 
@@ -343,7 +342,6 @@ menu() {
   done
 }
 
-# Inicia o menu se não passar argumentos, ou executa argumento direto
 if [ "$1" == "install" ]; then
   install_vpn
 elif [ "$1" == "update" ]; then
