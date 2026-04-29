@@ -149,7 +149,7 @@ SNAPSHOT
 
   echo -e "${YELLOW}[4/6] Configurando binário do WSSH...${NC}"
   echo -e "${BLUE}[i] Obtendo versão mais recente em: https://update.mtwtech.shop/latest${NC}"
-  LATEST_VERSION=$(curl -sL "https://update.mtwtech.shop/latest" | jq -r '.version')
+  LATEST_VERSION=$(curl -sL "https://update.mtwtech.shop/latest" | jq -r '.data.version')
   if [ -z "$LATEST_VERSION" ] || [ "$LATEST_VERSION" == "null" ]; then
     echo -e "${RED}[ERROR] Falha ao obter a versão mais recente da API.${NC}"
     exit 1
@@ -239,7 +239,7 @@ update_vpn() {
   systemctl stop wssh-vpn 2>/dev/null || true
 
   echo -e "${YELLOW}[2/3] Verificando versão mais recente...${NC}"
-  LATEST_VERSION=$(curl -sL "https://update.mtwtech.shop/latest" | jq -r '.version')
+  LATEST_VERSION=$(curl -sL "https://update.mtwtech.shop/latest" | jq -r '.data.version')
   if [ -z "$LATEST_VERSION" ] || [ "$LATEST_VERSION" == "null" ]; then
     echo -e "${RED}[ERROR] Falha ao obter a versão mais recente da API.${NC}"
     systemctl start wssh-vpn 2>/dev/null || true
@@ -341,6 +341,7 @@ menu() {
     esac
   done
 }
+
 
 if [ "$1" == "install" ]; then
   install_vpn
