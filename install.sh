@@ -44,7 +44,15 @@ BINARY_NAME="wssh-vpn_${OS}_${ARCH}"
 echo -e "${BLUE}[i] Sistema detectado: ${GREEN}${OS}/${ARCH}${NC}"
 echo -e "${BLUE}[i] Binário selecionado: ${GREEN}${BINARY_NAME}${NC}"
 echo ""
-# ────────────────────────────────────────────────────────────────
+
+# ── Dependências críticas ─────────────────────────────────────
+for dep in jq curl wget; do
+  if ! command -v "$dep" &>/dev/null; then
+    echo -e "${YELLOW}[dep] Instalando $dep...${NC}"
+    apt-get install -y -qq "$dep" >/dev/null 2>&1
+  fi
+done
+# ─────────────────────────────────────────────────────────────
 
 DB_NAME="wssh_db"
 
@@ -105,10 +113,6 @@ install_vpn() {
   sudo -u postgres psql -c "GRANT ALL PRIVILEGES ON DATABASE $DB_NAME TO $DB_USER;" >/dev/null 2>&1 || true
   sudo -u postgres psql -c "ALTER DATABASE $DB_NAME OWNER TO $DB_USER;" >/dev/null 2>&1 || true
   systemctl restart postgresql >/dev/null 2>&1 || true
-
-  if ! command -v jq &>/dev/null; then
-    apt-get install -y -qq jq >/dev/null 2>&1
-  fi
 
   echo -e "${YELLOW}[3/6] Arquitetando injeções de diretório JSON...${NC}"
   mkdir -p /etc/wssh
@@ -230,10 +234,6 @@ EOF
 
 update_vpn() {
   echo -e "${CYAN}⇨ Iniciando atualização do WSSH-VPN...${NC}\n"
-  
-  if ! command -v jq &>/dev/null; then
-    apt-get install -y -qq jq >/dev/null 2>&1
-  fi
 
   echo -e "${YELLOW}[1/3] Parando serviço...${NC}"
   systemctl stop wssh-vpn 2>/dev/null || true
@@ -283,7 +283,7 @@ update_vpn() {
 
   echo -e "${YELLOW}[3/3] Reiniciando serviço...${NC}"
   systemctl start wssh-vpn 2>/dev/null || true
-  
+
   echo -e "${GREEN}[OK] WSSH-VPN atualizado com sucesso para a versão ${LATEST_VERSION}!${NC}"
 }
 
@@ -341,7 +341,6 @@ menu() {
     esac
   done
 }
-
 
 if [ "$1" == "install" ]; then
   install_vpn
