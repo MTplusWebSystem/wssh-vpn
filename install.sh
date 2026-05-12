@@ -56,6 +56,27 @@ done
 
 DB_NAME="wssh_db"
 
+# ── Busca versão com fallback manual ─────────────────────────
+fetch_latest_version() {
+  local VERSION
+  echo -e "${BLUE}[i] Obtendo versão mais recente em: https://update.mtwtech.shop/latest${NC}"
+  VERSION=$(curl -sL --connect-timeout 10 --max-time 15 "https://update.mtwtech.shop/latest" 2>/dev/null \
+    | jq -r '.data.version // empty' 2>/dev/null)
+
+  if [ -z "$VERSION" ] || [ "$VERSION" == "null" ]; then
+    echo -e "${YELLOW}[!] API indisponível ou sem resposta.${NC}"
+    echo -e "${YELLOW}[?] Informe a versão manualmente (ex: 1.2.3):${NC}"
+    read -p "    Versão: " VERSION < /dev/tty
+    if [ -z "$VERSION" ]; then
+      echo -e "${RED}[ERROR] Versão não informada. Abortando.${NC}"
+      exit 1
+    fi
+  fi
+
+  echo "$VERSION"
+}
+# ─────────────────────────────────────────────────────────────
+
 install_vpn() {
   echo -e "${GREEN}[?] Parâmetros de Banco de Dados${NC}"
   read -p "    Usuário mínimo 6 caracteres: " DB_USER < /dev/tty
@@ -152,12 +173,7 @@ SNAPSHOT
   done
 
   echo -e "${YELLOW}[4/6] Configurando binário do WSSH...${NC}"
-  echo -e "${BLUE}[i] Obtendo versão mais recente em: https://update.mtwtech.shop/latest${NC}"
-  LATEST_VERSION=$(curl -sL "https://update.mtwtech.shop/latest" | jq -r '.data.version')
-  if [ -z "$LATEST_VERSION" ] || [ "$LATEST_VERSION" == "null" ]; then
-    echo -e "${RED}[ERROR] Falha ao obter a versão mais recente da API.${NC}"
-    exit 1
-  fi
+  LATEST_VERSION=$(fetch_latest_version)
 
   echo -e "${BLUE}[i] Baixando versão ${LATEST_VERSION}: https://update.mtwtech.shop/${LATEST_VERSION}/download${NC}"
   echo -e "${BLUE}[i] Binário alvo: ${BINARY_NAME}${NC}"
@@ -193,7 +209,6 @@ SNAPSHOT
 
   mv "/tmp/wssh-extract/${BINARY_NAME}" /usr/local/bin/wssh-vpn
   rm -rf /tmp/wssh-vpn.tar.gz /tmp/wssh-extract
-
   chmod +x /usr/local/bin/wssh-vpn 2>/dev/null || true
 
   echo -e "${YELLOW}[5/6] Formulando processos daemon...${NC}"
@@ -239,14 +254,10 @@ update_vpn() {
   systemctl stop wssh-vpn 2>/dev/null || true
 
   echo -e "${YELLOW}[2/3] Verificando versão mais recente...${NC}"
-  LATEST_VERSION=$(curl -sL "https://update.mtwtech.shop/latest" | jq -r '.data.version')
-  if [ -z "$LATEST_VERSION" ] || [ "$LATEST_VERSION" == "null" ]; then
-    echo -e "${RED}[ERROR] Falha ao obter a versão mais recente da API.${NC}"
-    systemctl start wssh-vpn 2>/dev/null || true
-    exit 1
-  fi
+  LATEST_VERSION=$(fetch_latest_version)
 
   echo -e "${BLUE}[i] Baixando atualização versão ${LATEST_VERSION}: https://update.mtwtech.shop/${LATEST_VERSION}/download${NC}"
+
   DOWNLOAD_SUCCESS=0
   for i in 1 2 3; do
     if wget -qO /tmp/wssh-vpn.tar.gz "https://update.mtwtech.shop/${LATEST_VERSION}/download"; then
