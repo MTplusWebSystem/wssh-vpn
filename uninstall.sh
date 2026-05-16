@@ -37,9 +37,19 @@ echo -e "  • Regras iptables/nftables adicionadas pelo instalador"
 echo -e "  • Restauração do systemd-resolved (se foi desativado)"
 echo ""
 
-# Confirmação interativa (pular com -y)
+# Confirmação interativa (pular com -y ou quando stdin não for um terminal)
 if [[ "${1:-}" != "-y" ]]; then
-  read -r -p "$(echo -e "${YELLOW}Tem certeza? Digite 'sim' para continuar: ${NC}")" CONFIRM
+  # Quando executado via "curl | bash", stdin é o pipe — lemos do terminal diretamente
+  if [[ -t 0 ]]; then
+    TTY_IN="/dev/stdin"
+  elif [[ -c /dev/tty ]]; then
+    TTY_IN="/dev/tty"
+  else
+    # Sem terminal disponível (CI, pipe puro) — exige -y explícito
+    error "Stdin não é um terminal. Use:  curl ... | sudo bash -s -- -y  para confirmar automaticamente."
+  fi
+  echo -en "${YELLOW}Tem certeza? Digite 'sim' para continuar: ${NC}"
+  read -r CONFIRM < "$TTY_IN"
   [[ "$CONFIRM" == "sim" ]] || { echo "Cancelado."; exit 0; }
 fi
 
