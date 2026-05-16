@@ -37,20 +37,22 @@ echo -e "  • Regras iptables/nftables adicionadas pelo instalador"
 echo -e "  • Restauração do systemd-resolved (se foi desativado)"
 echo ""
 
-# Confirmação interativa (pular com -y ou quando stdin não for um terminal)
+# Confirmação: interativa se tty disponível, countdown se vier de pipe
 if [[ "${1:-}" != "-y" ]]; then
-  # Quando executado via "curl | bash", stdin é o pipe — lemos do terminal diretamente
   if [[ -t 0 ]]; then
-    TTY_IN="/dev/stdin"
-  elif [[ -c /dev/tty ]]; then
-    TTY_IN="/dev/tty"
+    # Terminal direto — pede confirmação
+    echo -en "${YELLOW}Tem certeza? Digite 'sim' para continuar: ${NC}"
+    read -r CONFIRM
+    [[ "$CONFIRM" == "sim" ]] || { echo "Cancelado."; exit 0; }
   else
-    # Sem terminal disponível (CI, pipe puro) — exige -y explícito
-    error "Stdin não é um terminal. Use:  curl ... | sudo bash -s -- -y  para confirmar automaticamente."
+    # Pipe (curl | bash) — countdown de 5s; Ctrl+C cancela
+    echo -e "${YELLOW}Executando via pipe. Iniciando em 5 segundos — Ctrl+C para cancelar.${NC}"
+    for i in 5 4 3 2 1; do
+      echo -en "\r  ${RED}${i}...${NC}  "
+      sleep 1
+    done
+    echo ""
   fi
-  echo -en "${YELLOW}Tem certeza? Digite 'sim' para continuar: ${NC}"
-  read -r CONFIRM < "$TTY_IN"
-  [[ "$CONFIRM" == "sim" ]] || { echo "Cancelado."; exit 0; }
 fi
 
 SYSTEMCTL_BIN="$(command -v systemctl 2>/dev/null || true)"
