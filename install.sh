@@ -50,12 +50,12 @@ logw() { local ts; ts=$(date +"%Y-%m-%dT%H:%M:%S"); echo "${ts}  WARN  $*" >> "$
 loge() { local ts; ts=$(date +"%Y-%m-%dT%H:%M:%S"); echo "${ts}  ERROR $*" >> "$LOG_FILE"; }
 
 # ── Saída formatada ───────────────────────────────────────────────────────────
-info()    { echo -e "${BLUE}[·]${NC} $*";  log "$*"; }
-ok()      { echo -e "${GREEN}[✓]${NC} $*"; log "OK: $*"; }
-warn()    { echo -e "${YELLOW}[!]${NC} $*" >&2; logw "$*"; }
-step()    { echo -e "${CYAN}[→]${NC} ${BOLD}$*${NC}"; log "STEP: $*"; }
-die()     { echo -e "${RED}[✗] ERRO:${NC} $*" >&2; loge "$*"; echo -e "${DIM}    Log completo: ${LOG_FILE}${NC}" >&2; exit 1; }
-sep()     { echo -e "${DIM}────────────────────────────────────────────────────────────${NC}"; }
+info()    { echo -e "${BLUE}[·]${NC} $*"          >&2; log "$*"; }
+ok()      { echo -e "${GREEN}[✓]${NC} $*"        >&2; log "OK: $*"; } >&2
+warn()    { echo -e "${YELLOW}[!]${NC} $*"        >&2; logw "$*"; }
+step()    { echo -e "${CYAN}[→]${NC} ${BOLD}$*${NC}" >&2; log "STEP: $*"; } >&2
+die()     { echo -e "${RED}[✗] ERRO:${NC} $*"    >&2; loge "$*"; echo -e "${DIM}    Log completo: ${LOG_FILE}${NC}" >&2; exit 1; } >&2
+sep()     { echo -e "${DIM}────────────────────────────────────────────────────────────${NC}" >&2; } >&2
 
 # ── Cleanup de arquivos temporários ──────────────────────────────────────────
 _TMP_FILES=()
@@ -68,6 +68,64 @@ _cleanup() {
     rm -rf /tmp/wssh-extract 2>/dev/null || true
 }
 trap _cleanup EXIT
+
+# ── Wrappers curl com fallback SSL ───────────────────────────────────────────
+#
+# Tenta com verificação SSL; se falhar por certificado inválido/expirado,
+# repete com -k e emite um aviso visível.
+#
+_CURL_INSECURE=false   # definido como true na primeira vez que usamos -k
+
+_curl_get() {
+    # _curl_get [extra_flags...] <url>  → stdout = corpo da resposta
+    local out ec
+    out=$(curl -fsSL \
+        --connect-timeout 15 --max-time 30 \
+        --retry 3 --retry-delay 2 \
+        -A "wssh-installer/${INSTALLER_VERSION}" \
+        "$@" 2>/dev/null) && { printf '%s' "$out"; return 0; }
+
+    # Fallback: desabilita verificação SSL
+    out=$(curl -fsSL -k \
+        --connect-timeout 15 --max-time 30 \
+        --retry 3 --retry-delay 2 \
+        -A "wssh-installer/${INSTALLER_VERSION}" \
+        "$@" 2>/dev/null) && {
+        if [[ "$_CURL_INSECURE" == false ]]; then
+            warn "Certificado SSL do servidor expirado ou inválido — conexão insegura habilitada."
+            _CURL_INSECURE=true
+        fi
+        printf '%s' "$out"
+        return 0
+    }
+
+    return 1
+}
+
+_curl_download() {
+    # _curl_download <output_file> <url>  → salva em arquivo
+    local output_file="$1"; shift
+    curl -fL \
+        --connect-timeout 15 --max-time 300 \
+        --retry 2 --retry-delay 3 \
+        -A "wssh-installer/${INSTALLER_VERSION}" \
+        -o "$output_file" "$@" 2>/dev/null && return 0
+
+    # Fallback SSL
+    curl -fL -k \
+        --connect-timeout 15 --max-time 300 \
+        --retry 2 --retry-delay 3 \
+        -A "wssh-installer/${INSTALLER_VERSION}" \
+        -o "$output_file" "$@" 2>/dev/null && {
+        if [[ "$_CURL_INSECURE" == false ]]; then
+            warn "Certificado SSL do servidor expirado — download com SSL desabilitado."
+            _CURL_INSECURE=true
+        fi
+        return 0
+    }
+
+    return 1
+}
 
 # ── Parse de argumentos ───────────────────────────────────────────────────────
 _ACTION=""
@@ -117,7 +175,7 @@ _ask_secret() {
     fi
     local val
     read -r -s -p "$(echo -e "    ${prompt}: ")" val < /dev/tty || die "Não foi possível ler do terminal."
-    echo ""
+    echo "" >&2
     printf -v "$var" '%s' "${val:-$default}"
 }
 
@@ -211,51 +269,77 @@ detect_platform() {
 
 # ── Versão instalada (se houver) ──────────────────────────────────────────────
 get_installed_version() {
+    # Suporta versões como 1.2.3, 1.2.3.alpha.70, 1.2.3-beta.4
     if [[ -x "$BINARY_TARGET" ]]; then
-        "$BINARY_TARGET" --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || echo ""
+        "$BINARY_TARGET" --version 2>/dev/null \
+        | grep -oE '[0-9]+\.[0-9]+\.[0-9]+([.a-zA-Z0-9-]*)?' \
+        | head -1 \
+        || echo ""
     else
-        echo ""
+        echo "" >&2
     fi
 }
 
 # ── Obtém versão mais recente da API ─────────────────────────────────────────
 fetch_latest_version() {
+    # Retorna APENAS a versão no stdout. Toda mensagem vai para stderr via info/warn.
     local version=""
 
     info "Consultando versão mais recente em ${UPDATE_API}..."
 
     version=$(
-        curl -fsSL \
-            --connect-timeout 15 \
-            --max-time 30 \
-            --retry 3 \
-            --retry-delay 2 \
-            -A "wssh-installer/${INSTALLER_VERSION}" \
-            "${UPDATE_API}/latest" 2>/dev/null \
+        _curl_get "${UPDATE_API}/latest" \
         | jq -r '.data.version // empty' 2>/dev/null \
         || true
     )
+
+    # Sanitiza: remove espaços, newlines e caracteres de controle
+    version=$(printf '%s' "$version" | tr -d '[:space:][:cntrl:]')
 
     if [[ -z "$version" || "$version" == "null" ]]; then
         warn "API indisponível. Informe a versão manualmente."
         _ask version "Versão (ex: 1.2.3)" ""
         [[ -n "$version" ]] || die "Versão não informada."
+        # Sanitiza input do usuário também
+        version=$(printf '%s' "$version" | tr -d '[:space:][:cntrl:]')
     fi
 
-    echo "$version"
+    info "Versão obtida: ${version}"
+    printf '%s' "$version"
 }
 
-# ── Compara versões semânticas (A < B → retorna 0) ───────────────────────────
+# ── Compara versões (A < B → retorna 0; A >= B → retorna 1) ──────────────────
+#
+# Suporta: 1.2.3  1.2.3.alpha.70  1.2.3-beta.4
+# Estratégia: compara segmento a segmento; segmentos não-numéricos (alpha, beta)
+# são tratados como 0 (versão de pré-release < release do mesmo número).
+#
 _version_lt() {
-    # Retorna 0 se $1 < $2 (ou seja, há update disponível)
     [[ "$1" == "$2" ]] && return 1
+
+    # Normaliza separadores (. e -) e converte para array
     local IFS=.
-    local i a=($1) b=($2)
-    for i in "${!a[@]}"; do
-        a[$i]=$((10#${a[$i]:-0}))
-        b[$i]=$((10#${b[$i]:-0}))
-        (( a[i] < b[i] )) && return 0
-        (( a[i] > b[i] )) && return 1
+    local va vb
+    va=$(printf '%s' "$1" | tr '-' '.')
+    vb=$(printf '%s' "$2" | tr '-' '.')
+
+    local a=($va) b=($vb)
+    local max=$(( ${#a[@]} > ${#b[@]} ? ${#a[@]} : ${#b[@]} ))
+    local i av bv
+
+    for (( i=0; i<max; i++ )); do
+        av="${a[$i]:-0}"
+        bv="${b[$i]:-0}"
+
+        # Se segmento não for numérico puro, usa 0 (alpha < release)
+        [[ "$av" =~ ^[0-9]+$ ]] || av=0
+        [[ "$bv" =~ ^[0-9]+$ ]] || bv=0
+
+        av=$((10#$av))
+        bv=$((10#$bv))
+
+        (( av < bv )) && return 0
+        (( av > bv )) && return 1
     done
     return 1
 }
@@ -276,18 +360,12 @@ download_package() {
     local attempt downloaded=false
     for attempt in 1 2 3; do
         info "Download — tentativa ${attempt}/3..."
-        if curl -fL \
-            --connect-timeout 15 \
-            --max-time 300 \
-            --retry 2 \
-            --retry-delay 3 \
-            -A "wssh-installer/${INSTALLER_VERSION}" \
-            -o "$package_file" \
-            "$url" 2>/dev/null && [[ -s "$package_file" ]]; then
+        if _curl_download "$package_file" "$url" && [[ -s "$package_file" ]]; then
             downloaded=true
             break
         fi
         warn "Tentativa ${attempt} falhou."
+        rm -f "$package_file"
         [[ "$attempt" -lt 3 ]] && sleep 3
     done
 
@@ -326,19 +404,21 @@ show_banner() {
     local installed_ver
     installed_ver=$(get_installed_version)
 
-    echo ""
-    echo -e "${CYAN}╔═══════════════════════════════════════════════════════════╗${NC}"
-    echo -e "${CYAN}║        ${BOLD}WSSH-VPN  —  Setup & Management${NC}${CYAN}                  ║${NC}"
-    echo -e "${CYAN}╠═══════════════════════════════════════════════════════════╣${NC}"
-    printf "${CYAN}║${NC}  Installer : %-43s${CYAN}║${NC}\n" "v${INSTALLER_VERSION}"
-    printf "${CYAN}║${NC}  Sistema   : %-43s${CYAN}║${NC}\n" "${PLATFORM_OS}/${PLATFORM_ARCH}"
-    if [[ -n "$installed_ver" ]]; then
-        printf "${CYAN}║${NC}  Instalado : %-43s${CYAN}║${NC}\n" "v${installed_ver}"
-    else
-        printf "${CYAN}║${NC}  Status    : %-43s${CYAN}║${NC}\n" "não instalado"
-    fi
-    echo -e "${CYAN}╚═══════════════════════════════════════════════════════════╝${NC}"
-    echo ""
+    {
+        echo "" >&2
+        echo -e "${CYAN}╔═══════════════════════════════════════════════════════════╗${NC}" >&2
+        echo -e "${CYAN}║        ${BOLD}WSSH-VPN  —  Setup & Management${NC}${CYAN}                  ║${NC}" >&2
+        echo -e "${CYAN}╠═══════════════════════════════════════════════════════════╣${NC}" >&2
+        printf "${CYAN}║${NC}  Installer : %-43s${CYAN}║${NC}\n" "v${INSTALLER_VERSION}" >&2
+        printf "${CYAN}║${NC}  Sistema   : %-43s${CYAN}║${NC}\n" "${PLATFORM_OS}/${PLATFORM_ARCH}" >&2
+        if [[ -n "$installed_ver" ]]; then
+            printf "${CYAN}║${NC}  Instalado : %-43s${CYAN}║${NC}\n" "v${installed_ver}" >&2
+        else
+            printf "${CYAN}║${NC}  Status    : %-43s${CYAN}║${NC}\n" "não instalado" >&2
+        fi
+        echo -e "${CYAN}╚═══════════════════════════════════════════════════════════╝${NC}" >&2
+        echo "" >&2
+    } >&2
 }
 
 # =============================================================================
@@ -350,7 +430,7 @@ install_vpn() {
 
     # ── Parâmetros de Banco de Dados ─────────────────────────────────────────
 
-    echo -e "\n${BOLD}  Banco de Dados (PostgreSQL)${NC}"
+    echo -e "\n${BOLD}  Banco de Dados (PostgreSQL)${NC}" >&2
     local DB_USER DB_PASS
 
     _ask    DB_USER "Usuário do banco (mín. 6 chars)"    "wssh_user"
@@ -359,11 +439,11 @@ install_vpn() {
     _ask_secret DB_PASS "Senha do banco (mín. 8 chars)" "senha123"
     _validate_min_len "$DB_PASS" 8 "Senha do banco"
 
-    echo ""
+    echo "" >&2
 
     # ── Parâmetros do Painel ─────────────────────────────────────────────────
 
-    echo -e "${BOLD}  Painel Administrativo${NC}"
+    echo -e "${BOLD}  Painel Administrativo${NC}" >&2
     local PANEL_USER PANEL_PASS
 
     _ask    PANEL_USER "Usuário admin (mín. 6 chars)"    "admin"
@@ -372,14 +452,14 @@ install_vpn() {
     _ask_secret PANEL_PASS "Senha admin (mín. 8 chars)"  "admin123"
     _validate_min_len "$PANEL_PASS" 8 "Senha admin"
 
-    echo ""
+    echo "" >&2
     sep
     step "Iniciando deployment da infraestrutura..."
     sep
-    echo ""
+    echo "" >&2
 
     # ── [1/6] Limpeza ────────────────────────────────────────────────────────
-    echo -e "${YELLOW}[1/6]${NC} Limpeza de instalação anterior..."
+    echo -e "${YELLOW}[1/6]${NC} Limpeza de instalação anterior..." >&2
     log "Iniciando limpeza"
 
     systemctl stop    wssh-vpn 2>/dev/null || true
@@ -401,7 +481,7 @@ install_vpn() {
     ok "Limpeza concluída."
 
     # ── [2/6] PostgreSQL ─────────────────────────────────────────────────────
-    echo -e "${YELLOW}[2/6]${NC} Configurando PostgreSQL..."
+    echo -e "${YELLOW}[2/6]${NC} Configurando PostgreSQL..." >&2
     log "Configurando PostgreSQL: db=${DB_NAME} user=${DB_USER}"
 
     if ! command -v psql &>/dev/null; then
@@ -431,7 +511,7 @@ install_vpn() {
     ok "PostgreSQL configurado."
 
     # ── [3/6] Diretório de configuração ──────────────────────────────────────
-    echo -e "${YELLOW}[3/6]${NC} Criando configuração..."
+    echo -e "${YELLOW}[3/6]${NC} Criando configuração..." >&2
     log "Criando ${CONFIG_DIR}"
 
     mkdir -p "${CONFIG_DIR}"
@@ -484,7 +564,7 @@ install_vpn() {
     ok "Configuração criada em ${CONFIG_DIR}."
 
     # ── [4/6] Binário ────────────────────────────────────────────────────────
-    echo -e "${YELLOW}[4/6]${NC} Baixando binário..."
+    echo -e "${YELLOW}[4/6]${NC} Baixando binário..." >&2
 
     local LATEST_VERSION
     LATEST_VERSION=$(fetch_latest_version) \
@@ -498,7 +578,7 @@ install_vpn() {
     ok "Binário instalado em ${BINARY_TARGET} (v${LATEST_VERSION})."
 
     # ── [5/6] Unit systemd ───────────────────────────────────────────────────
-    echo -e "${YELLOW}[5/6]${NC} Criando serviço systemd..."
+    echo -e "${YELLOW}[5/6]${NC} Criando serviço systemd..." >&2
 
     local tmp_unit; tmp_unit=$(_tmp)
     cat > "$tmp_unit" <<'UNIT_EOF'
@@ -539,7 +619,7 @@ UNIT_EOF
     ok "Unit systemd criada."
 
     # ── [6/6] Ativa e inicia o serviço ───────────────────────────────────────
-    echo -e "${YELLOW}[6/6]${NC} Iniciando serviço..."
+    echo -e "${YELLOW}[6/6]${NC} Iniciando serviço..." >&2
 
     systemctl daemon-reload
     systemctl enable wssh-vpn >/dev/null 2>&1
@@ -556,22 +636,22 @@ UNIT_EOF
 
     if [[ "$ready" != true ]]; then
         warn "O serviço não ficou ativo em 15 s. Verifique os logs:"
-        echo -e "    ${DIM}journalctl -u wssh-vpn -n 50 --no-pager${NC}"
+        echo -e "    ${DIM}journalctl -u wssh-vpn -n 50 --no-pager${NC}" >&2
         loge "Serviço wssh-vpn não iniciou após instalação."
     fi
 
     sep
-    echo -e "${GREEN}╔═══════════════════════════════════════════════════════════╗${NC}"
-    echo -e "${GREEN}║           INSTALAÇÃO CONCLUÍDA COM SUCESSO!               ║${NC}"
-    echo -e "${GREEN}╠═══════════════════════════════════════════════════════════╣${NC}"
-    printf  "${GREEN}║${NC}  Versão    : %-43s${GREEN}║${NC}\n" "v${LATEST_VERSION}"
-    printf  "${GREEN}║${NC}  Serviço   : %-43s${GREEN}║${NC}\n" "$(systemctl is-active wssh-vpn 2>/dev/null || echo 'verificar')"
-    printf  "${GREEN}║${NC}  Log       : %-43s${GREEN}║${NC}\n" "${LOG_FILE}"
-    echo -e "${GREEN}╠═══════════════════════════════════════════════════════════╣${NC}"
-    echo -e "${GREEN}║${NC}  Acesse o menu CLI a qualquer momento:                   ${GREEN}║${NC}"
-    echo -e "${GREEN}║${NC}    ${BOLD}wssh-vpn${NC}                                              ${GREEN}║${NC}"
-    echo -e "${GREEN}╚═══════════════════════════════════════════════════════════╝${NC}"
-    echo ""
+    echo -e "${GREEN}╔═══════════════════════════════════════════════════════════╗${NC}" >&2
+    echo -e "${GREEN}║           INSTALAÇÃO CONCLUÍDA COM SUCESSO!               ║${NC}" >&2
+    echo -e "${GREEN}╠═══════════════════════════════════════════════════════════╣${NC}" >&2
+    printf  "${GREEN}║${NC}  Versão    : %-43s${GREEN}║${NC}\n" "v${LATEST_VERSION}" >&2
+    printf  "${GREEN}║${NC}  Serviço   : %-43s${GREEN}║${NC}\n" "$(systemctl is-active wssh-vpn 2>/dev/null || echo 'verificar')" >&2
+    printf  "${GREEN}║${NC}  Log       : %-43s${GREEN}║${NC}\n" "${LOG_FILE}" >&2
+    echo -e "${GREEN}╠═══════════════════════════════════════════════════════════╣${NC}" >&2
+    echo -e "${GREEN}║${NC}  Acesse o menu CLI a qualquer momento:                   ${GREEN}║${NC}" >&2
+    echo -e "${GREEN}║${NC}    ${BOLD}wssh-vpn${NC}                                              ${GREEN}║${NC}" >&2
+    echo -e "${GREEN}╚═══════════════════════════════════════════════════════════╝${NC}" >&2
+    echo "" >&2
 
     log "Instalação concluída. Versão: ${LATEST_VERSION}"
 }
@@ -587,15 +667,15 @@ update_vpn() {
         || die "WSSH-VPN não está instalado em ${BINARY_TARGET}. Execute a instalação primeiro."
 
     # ── [1/5] Verifica versão ────────────────────────────────────────────────
-    echo -e "${YELLOW}[1/5]${NC} Verificando versão..."
+    echo -e "${YELLOW}[1/5]${NC} Verificando versão..." >&2
 
     local INSTALLED_VERSION LATEST_VERSION
     INSTALLED_VERSION=$(get_installed_version)
     LATEST_VERSION=$(fetch_latest_version) \
         || die "Não foi possível obter a versão mais recente."
 
-    printf "    Instalada   : %s\n" "${INSTALLED_VERSION:-desconhecida}"
-    printf "    Disponível  : %s\n" "$LATEST_VERSION"
+    printf "    Instalada   : %s\n" "${INSTALLED_VERSION:-desconhecida}" >&2
+    printf "    Disponível  : %s\n" "$LATEST_VERSION" >&2
 
     if [[ -n "$INSTALLED_VERSION" ]] && ! _version_lt "$INSTALLED_VERSION" "$LATEST_VERSION"; then
         ok "Já está na versão mais recente (v${LATEST_VERSION}). Nenhuma ação necessária."
@@ -603,7 +683,7 @@ update_vpn() {
     fi
 
     # ── [2/5] Download ───────────────────────────────────────────────────────
-    echo -e "${YELLOW}[2/5]${NC} Baixando e validando pacote..."
+    echo -e "${YELLOW}[2/5]${NC} Baixando e validando pacote..." >&2
 
     download_package "$LATEST_VERSION" \
         || die "Falha no download. O serviço atual não foi alterado."
@@ -613,7 +693,7 @@ update_vpn() {
     chmod +x "$NEW_BINARY"
 
     # ── [3/5] Para serviço e faz backup ─────────────────────────────────────
-    echo -e "${YELLOW}[3/5]${NC} Preparando substituição do binário..."
+    echo -e "${YELLOW}[3/5]${NC} Preparando substituição do binário..." >&2
 
     systemctl stop wssh-vpn \
         || die "Não foi possível parar o serviço. Abortando para preservar instalação atual."
@@ -635,7 +715,7 @@ update_vpn() {
     ok "Novo binário instalado."
 
     # ── [4/5] Reinicia serviço ───────────────────────────────────────────────
-    echo -e "${YELLOW}[4/5]${NC} Reiniciando serviço..."
+    echo -e "${YELLOW}[4/5]${NC} Reiniciando serviço..." >&2
 
     if ! systemctl start wssh-vpn; then
         warn "Novo binário falhou ao iniciar. Restaurando versão anterior..."
@@ -647,7 +727,7 @@ update_vpn() {
     fi
 
     # ── [5/5] Confirma atualização ───────────────────────────────────────────
-    echo -e "${YELLOW}[5/5]${NC} Verificando serviço..."
+    echo -e "${YELLOW}[5/5]${NC} Verificando serviço..." >&2
 
     local i ready=false
     for i in {1..10}; do
@@ -657,18 +737,18 @@ update_vpn() {
 
     if [[ "$ready" == true ]]; then
         sep
-        echo -e "${GREEN}╔═══════════════════════════════════════════════════════════╗${NC}"
-        echo -e "${GREEN}║           ATUALIZAÇÃO CONCLUÍDA COM SUCESSO!              ║${NC}"
-        echo -e "${GREEN}╠═══════════════════════════════════════════════════════════╣${NC}"
-        printf  "${GREEN}║${NC}  Versão anterior : %-39s${GREEN}║${NC}\n" "${INSTALLED_VERSION:-desconhecida}"
-        printf  "${GREEN}║${NC}  Versão atual    : %-39s${GREEN}║${NC}\n" "v${LATEST_VERSION}"
-        echo -e "${GREEN}╚═══════════════════════════════════════════════════════════╝${NC}"
-        echo ""
+        echo -e "${GREEN}╔═══════════════════════════════════════════════════════════╗${NC}" >&2
+        echo -e "${GREEN}║           ATUALIZAÇÃO CONCLUÍDA COM SUCESSO!              ║${NC}" >&2
+        echo -e "${GREEN}╠═══════════════════════════════════════════════════════════╣${NC}" >&2
+        printf  "${GREEN}║${NC}  Versão anterior : %-39s${GREEN}║${NC}\n" "${INSTALLED_VERSION:-desconhecida}" >&2
+        printf  "${GREEN}║${NC}  Versão atual    : %-39s${GREEN}║${NC}\n" "v${LATEST_VERSION}" >&2
+        echo -e "${GREEN}╚═══════════════════════════════════════════════════════════╝${NC}" >&2
+        echo "" >&2
         log "Atualização concluída: ${INSTALLED_VERSION} → ${LATEST_VERSION}"
     else
         loge "Serviço não ativou após update para v${LATEST_VERSION}."
         warn "Serviço não ficou ativo após a atualização."
-        echo -e "    Logs: ${DIM}journalctl -u wssh-vpn -n 50 --no-pager${NC}"
+        echo -e "    Logs: ${DIM}journalctl -u wssh-vpn -n 50 --no-pager${NC}" >&2
     fi
 }
 
@@ -679,9 +759,9 @@ uninstall_vpn() {
     step "Desinstalação do WSSH-VPN..."
     sep
 
-    echo -e "${RED}  ATENÇÃO: Esta operação remove o WSSH-VPN do sistema.${NC}"
-    echo -e "${DIM}  Backups de banco de dados e configurações são recomendados antes de prosseguir.${NC}"
-    echo ""
+    echo -e "${RED}  ATENÇÃO: Esta operação remove o WSSH-VPN do sistema.${NC}" >&2
+    echo -e "${DIM}  Backups de banco de dados e configurações são recomendados antes de prosseguir.${NC}" >&2
+    echo "" >&2
 
     _ask_confirm "Confirma a desinstalação?" "n" \
         || { warn "Desinstalação cancelada."; return 0; }
@@ -696,20 +776,20 @@ uninstall_vpn() {
     cfg_db_name="$DB_NAME"
 
     # ── [1/4] Para serviços ──────────────────────────────────────────────────
-    echo -e "${YELLOW}[1/4]${NC} Parando serviço..."
+    echo -e "${YELLOW}[1/4]${NC} Parando serviço..." >&2
     systemctl stop    wssh-vpn 2>/dev/null || true
     systemctl disable wssh-vpn 2>/dev/null || true
     ok "Serviço parado."
 
     # ── [2/4] Remove arquivos do sistema ────────────────────────────────────
-    echo -e "${YELLOW}[2/4]${NC} Removendo arquivos do sistema..."
+    echo -e "${YELLOW}[2/4]${NC} Removendo arquivos do sistema..." >&2
     rm -f /etc/systemd/system/wssh-vpn.service
     systemctl daemon-reload 2>/dev/null || true
     rm -f "$BINARY_TARGET" "${BINARY_TARGET}.bak"
     ok "Binário e unit systemd removidos."
 
     # ── [3/4] Banco de dados (opcional) ─────────────────────────────────────
-    echo -e "${YELLOW}[3/4]${NC} Banco de dados..."
+    echo -e "${YELLOW}[3/4]${NC} Banco de dados..." >&2
     if _ask_confirm "Remover banco '${cfg_db_name}' e usuário '${cfg_db_user}'?" "n"; then
         sudo -u postgres psql -qc "DROP DATABASE IF EXISTS ${cfg_db_name};" >/dev/null 2>&1 || true
         sudo -u postgres psql -qc "DROP USER IF EXISTS \"${cfg_db_user}\";"  >/dev/null 2>&1 || true
@@ -719,7 +799,7 @@ uninstall_vpn() {
     fi
 
     # ── [4/4] Configurações e licenças (opcional) ────────────────────────────
-    echo -e "${YELLOW}[4/4]${NC} Configurações..."
+    echo -e "${YELLOW}[4/4]${NC} Configurações..." >&2
     if _ask_confirm "Remover configurações e licenças (${CONFIG_DIR})?" "n"; then
         rm -rf "${CONFIG_DIR}"
         ok "Diretório ${CONFIG_DIR} removido."
@@ -730,7 +810,7 @@ uninstall_vpn() {
     sep
     ok "Desinstalação concluída."
     log "Desinstalação executada."
-    echo ""
+    echo "" >&2
 }
 
 # =============================================================================
@@ -738,24 +818,26 @@ uninstall_vpn() {
 # =============================================================================
 show_menu() {
     while true; do
-        echo -e "${CYAN}  O que você deseja fazer?${NC}"
-        echo ""
-        echo -e "    ${YELLOW}[1]${NC} Instalar   WSSH-VPN"
-        echo -e "    ${YELLOW}[2]${NC} Atualizar  WSSH-VPN"
-        echo -e "    ${YELLOW}[3]${NC} Desinstalar WSSH-VPN"
-        echo -e "    ${YELLOW}[0]${NC} Sair"
-        echo ""
+        {
+            echo -e "${CYAN}  O que você deseja fazer?${NC}" >&2
+            echo "" >&2
+            echo -e "    ${YELLOW}[1]${NC} Instalar   WSSH-VPN" >&2
+            echo -e "    ${YELLOW}[2]${NC} Atualizar  WSSH-VPN" >&2
+            echo -e "    ${YELLOW}[3]${NC} Desinstalar WSSH-VPN" >&2
+            echo -e "    ${YELLOW}[0]${NC} Sair" >&2
+            echo "" >&2
+        } >&2
 
         local option
-        read -r -p "$(echo -e "  ${BOLD}→${NC} Opção: ")" option < /dev/tty
+        read -r -p "$(echo -e "  ${BOLD}→${NC} Opção: " >&2; echo -n "")" option < /dev/tty >&2
 
-        echo ""
+        echo "" >&2
         case "$option" in
             1) install_vpn;   break ;;
             2) update_vpn;    break ;;
             3) uninstall_vpn; break ;;
             0) info "Saindo."; exit 0 ;;
-            *) warn "Opção inválida: '${option}'. Tente novamente."; echo "" ;;
+            *) warn "Opção inválida: '${option}'. Tente novamente."; echo "" >&2 ;;
         esac
     done
 }
