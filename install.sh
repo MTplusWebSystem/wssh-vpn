@@ -14,7 +14,7 @@ IFS=$'\n\t'
 export DEBIAN_FRONTEND=noninteractive
 
 # ── Versão do installer ───────────────────────────────────────────────────────
-readonly INSTALLER_VERSION="2.1.1"
+readonly INSTALLER_VERSION="2.1.2"
 readonly INSTALL_DIR="/usr/local/bin"
 readonly CONFIG_DIR="/etc/wssh"
 readonly DB_NAME="wssh_db"
@@ -823,8 +823,13 @@ update_vpn() {
     step "Iniciando atualização do WSSH-VPN..."
     sep
 
-    [[ -x "$BINARY_TARGET" ]] \
-        || die "WSSH-VPN não está instalado em ${BINARY_TARGET}. Execute a instalação primeiro."
+    if [[ ! -x "$BINARY_TARGET" ]]; then
+        warn "WSSH-VPN não está instalado em ${BINARY_TARGET}."
+        info "Redirecionando para instalação a partir de arquivo local..."
+        echo "" >&2
+        install_local_package
+        return
+    fi
 
     # ── [1/5] Verifica versão ────────────────────────────────────────────────
     echo -e "${YELLOW}[1/5]${NC} Verificando versão..." >&2
@@ -1158,8 +1163,8 @@ show_menu() {
         echo -e "    ${YELLOW}[1]${NC} Instalar    WSSH-VPN" >&2
         echo -e "    ${YELLOW}[2]${NC} Atualizar   WSSH-VPN" >&2
         echo -e "    ${YELLOW}[3]${NC} Desinstalar WSSH-VPN" >&2
-        echo -e "    ${YELLOW}[4]${NC} Atualizar a partir de ${BOLD}arquivo local${NC} (${PKG_FILENAME})" >&2
-        echo -e "    ${DIM}      (use quando o download automático falhar)${NC}" >&2
+        echo -e "    ${YELLOW}[4]${NC} Instalar / Atualizar a partir de ${BOLD}arquivo local${NC} (${PKG_FILENAME})" >&2
+        echo -e "    ${DIM}      (instala ou atualiza sem precisar de download)${NC}" >&2
         echo -e "    ${YELLOW}[0]${NC} Sair" >&2
         echo "" >&2
 
