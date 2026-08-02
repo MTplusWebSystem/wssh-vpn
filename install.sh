@@ -6,13 +6,15 @@
 #    wget  -qO-  https://raw.githubusercontent.com/MTplusWebSystem/wssh-vpn/refs/heads/main/install.sh | sudo bash
 #    # Modo não-interativo:
 #    curl -fsSL ... | sudo bash -s -- install --auto
+#    # Instalar de arquivo local:
+#    sudo bash install.sh local --file /root/download
 # =============================================================================
 set -euo pipefail
 IFS=$'\n\t'
 export DEBIAN_FRONTEND=noninteractive
 
 # ── Versão do installer ───────────────────────────────────────────────────────
-readonly INSTALLER_VERSION="2.0.0"
+readonly INSTALLER_VERSION="2.1.0"
 readonly INSTALL_DIR="/usr/local/bin"
 readonly CONFIG_DIR="/etc/wssh"
 readonly DB_NAME="wssh_db"
@@ -24,6 +26,11 @@ readonly LOG_FILE="/var/log/wssh-vpn-install.log"
 # ── Flags de controle ─────────────────────────────────────────────────────────
 AUTO_MODE=false       # --auto: usa defaults sem perguntar
 QUIET=false           # --quiet: suprime banner
+
+# ── Estado global ─────────────────────────────────────────────────────────────
+_MANUAL_PKG_PATH=""   # --file <path>: usa arquivo local em vez de baixar
+_PROG_PID=""          # PID do monitor de progresso (para cleanup no trap)
+_CURL_INSECURE=false  # ativa na primeira vez que cai no fallback -k
 
 # ── Cores (ativadas apenas se stdout for TTY real) ────────────────────────────
 if [[ -t 1 ]]; then
@@ -50,12 +57,13 @@ logw() { local ts; ts=$(date +"%Y-%m-%dT%H:%M:%S"); echo "${ts}  WARN  $*" >> "$
 loge() { local ts; ts=$(date +"%Y-%m-%dT%H:%M:%S"); echo "${ts}  ERROR $*" >> "$LOG_FILE"; }
 
 # ── Saída formatada ───────────────────────────────────────────────────────────
-info()    { echo -e "${BLUE}[·]${NC} $*"          >&2; log "$*"; }
-ok()      { echo -e "${GREEN}[✓]${NC} $*"        >&2; log "OK: $*"; } >&2
-warn()    { echo -e "${YELLOW}[!]${NC} $*"        >&2; logw "$*"; }
-step()    { echo -e "${CYAN}[→]${NC} ${BOLD}$*${NC}" >&2; log "STEP: $*"; } >&2
-die()     { echo -e "${RED}[✗] ERRO:${NC} $*"    >&2; loge "$*"; echo -e "${DIM}    Log completo: ${LOG_FILE}${NC}" >&2; exit 1; } >&2
-sep()     { echo -e "${DIM}────────────────────────────────────────────────────────────${NC}" >&2; } >&2
+info()    { echo -e "${BLUE}[·]${NC} $*"               >&2; log "$*"; }
+ok()      { echo -e "${GREEN}[✓]${NC} $*"             >&2; log "OK: $*"; }
+warn()    { echo -e "${YELLOW}[!]${NC} $*"             >&2; logw "$*"; }
+step()    { echo -e "${CYAN}[→]${NC} ${BOLD}$*${NC}"  >&2; log "STEP: $*"; }
+die()     { echo -e "${RED}[✗] ERRO:${NC} $*"         >&2; loge "$*"
+            echo -e "${DIM}    Log completo: ${LOG_FILE}${NC}" >&2; exit 1; }
+sep()     { echo -e "${DIM}────────────────────────────────────────────────────────────${NC}" >&2; }
 
 # ── Cleanup de arquivos temporários ──────────────────────────────────────────
 _TMP_FILES=()
@@ -66,18 +74,13 @@ _cleanup() {
         [[ -f "$f" ]] && rm -f "$f" 2>/dev/null || true
     done
     rm -rf /tmp/wssh-extract 2>/dev/null || true
+    # Garante que o monitor de progresso é encerrado
+    [[ -n "${_PROG_PID:-}" ]] && kill "$_PROG_PID" 2>/dev/null || true
 }
 trap _cleanup EXIT
 
 # ── Wrappers curl com fallback SSL ───────────────────────────────────────────
-#
-# Tenta com verificação SSL; se falhar por certificado inválido/expirado,
-# repete com -k e emite um aviso visível.
-#
-_CURL_INSECURE=false   # definido como true na primeira vez que usamos -k
-
 _curl_get() {
-    # _curl_get [extra_flags...] <url>  → stdout = corpo da resposta
     local out ec
     out=$(curl -fsSL \
         --connect-timeout 15 --max-time 30 \
@@ -85,7 +88,6 @@ _curl_get() {
         -A "wssh-installer/${INSTALLER_VERSION}" \
         "$@" 2>/dev/null) && { printf '%s' "$out"; return 0; }
 
-    # Fallback: desabilita verificação SSL
     out=$(curl -fsSL -k \
         --connect-timeout 15 --max-time 30 \
         --retry 3 --retry-delay 2 \
@@ -98,33 +100,108 @@ _curl_get() {
         printf '%s' "$out"
         return 0
     }
-
     return 1
 }
 
-_curl_download() {
-    # _curl_download <output_file> <url>  → salva em arquivo
-    local output_file="$1"; shift
+# ── Obtém tamanho do arquivo remoto via HEAD (best-effort) ───────────────────
+_get_remote_size() {
+    local url="$1"
+    local size
+    size=$(curl -fsSLI \
+        --connect-timeout 10 --max-time 15 \
+        -k \
+        -A "wssh-installer/${INSTALLER_VERSION}" \
+        "$url" 2>/dev/null \
+        | grep -i "^content-length:" \
+        | tail -1 \
+        | awk '{print $2}' \
+        | tr -d '[:space:][:cntrl:]')
+    [[ "$size" =~ ^[0-9]+$ ]] && echo "$size" || echo 0
+}
+
+# ── Monitor de progresso de download ─────────────────────────────────────────
+# Executa em background enquanto o curl baixa para <arquivo>.
+# Mostra % real se <total_bytes> > 0, ou spinner+bytes caso contrário.
+#
+# Uso:
+#   _progress_bar "$pkg_file" "$total_size" &
+#   _PROG_PID=$!
+#   ... curl download ...
+#   kill "$_PROG_PID" 2>/dev/null; wait "$_PROG_PID" 2>/dev/null || true
+#   printf "\r%80s\r" "" >&2
+#
+_progress_bar() {
+    local file="$1" total="${2:-0}"
+    local start=$SECONDS size elapsed speed_bps speed_kbps mb_int mb_dec pct filled bar i
+
+    local -a spin=("▹▹▹▹▹" "▸▹▹▹▹" "▸▸▹▹▹" "▸▸▸▹▹" "▸▸▸▸▹" "▸▸▸▸▸")
+
+    while true; do
+        sleep 0.8
+        [[ -f "$file" ]] || continue
+        size=$(stat -c%s "$file" 2>/dev/null || echo 0)
+        elapsed=$(( SECONDS - start + 1 ))
+        speed_bps=$(( size / elapsed ))
+        speed_kbps=$(( speed_bps / 1024 ))
+        mb_int=$(( size / 1048576 ))
+        mb_dec=$(( (size * 10 / 1048576) % 10 ))
+
+        if [[ "$total" -gt 0 ]]; then
+            pct=$(( size * 100 / total ))
+            [[ "$pct" -gt 100 ]] && pct=100
+            filled=$(( pct * 28 / 100 ))
+            bar=""
+            for (( i=0; i<28; i++ )); do
+                (( i < filled )) && bar+="█" || bar+="░"
+            done
+            local total_mb=$(( total / 1048576 ))
+            printf "\r    [%s] %3d%%  %d.%dMB / %dMB  %d KB/s  " \
+                "$bar" "$pct" "$mb_int" "$mb_dec" "$total_mb" "$speed_kbps" >&2
+        else
+            local spin_idx=$(( (elapsed - 1) % 6 ))
+            printf "\r    [%s]  %d.%d MB baixados  %d KB/s  " \
+                "${spin[$spin_idx]}" "$mb_int" "$mb_dec" "$speed_kbps" >&2
+        fi
+    done
+}
+
+# ── Download com progresso + fallback SSL ────────────────────────────────────
+_curl_download_progress() {
+    # _curl_download_progress <output_file> <url> [total_size]
+    local output_file="$1" url="$2" total_size="${3:-0}"
+
+    # Inicia monitor de progresso em background
+    _progress_bar "$output_file" "$total_size" &
+    _PROG_PID=$!
+
+    local dl_ok=false
+
     curl -fL \
         --connect-timeout 15 --max-time 300 \
-        --retry 2 --retry-delay 3 \
+        --retry 0 \
         -A "wssh-installer/${INSTALLER_VERSION}" \
-        -o "$output_file" "$@" 2>/dev/null && return 0
+        -o "$output_file" "$url" 2>/dev/null && dl_ok=true
 
-    # Fallback SSL
-    curl -fL -k \
-        --connect-timeout 15 --max-time 300 \
-        --retry 2 --retry-delay 3 \
-        -A "wssh-installer/${INSTALLER_VERSION}" \
-        -o "$output_file" "$@" 2>/dev/null && {
-        if [[ "$_CURL_INSECURE" == false ]]; then
-            warn "Certificado SSL do servidor expirado — download com SSL desabilitado."
-            _CURL_INSECURE=true
-        fi
-        return 0
-    }
+    if [[ "$dl_ok" == false ]]; then
+        curl -fL -k \
+            --connect-timeout 15 --max-time 300 \
+            --retry 0 \
+            -A "wssh-installer/${INSTALLER_VERSION}" \
+            -o "$output_file" "$url" 2>/dev/null && dl_ok=true && {
+            if [[ "$_CURL_INSECURE" == false ]]; then
+                warn "Download sem verificação SSL (certificado expirado)."
+                _CURL_INSECURE=true
+            fi
+        }
+    fi
 
-    return 1
+    # Para o monitor e limpa a linha
+    kill "$_PROG_PID" 2>/dev/null
+    wait "$_PROG_PID" 2>/dev/null || true
+    _PROG_PID=""
+    printf "\r%80s\r" "" >&2
+
+    [[ "$dl_ok" == true ]]
 }
 
 # ── Parse de argumentos ───────────────────────────────────────────────────────
@@ -134,11 +211,32 @@ _EXTRA_ARGS=()
 _parse_args() {
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            install|update|uninstall) _ACTION="$1" ;;
-            --auto|-y)   AUTO_MODE=true ;;
-            --quiet|-q)  QUIET=true ;;
+            install|update|uninstall|local)
+                _ACTION="$1" ;;
+            --auto|-y)
+                AUTO_MODE=true ;;
+            --quiet|-q)
+                QUIET=true ;;
+            --file|-f)
+                shift
+                _MANUAL_PKG_PATH="${1:-}"
+                [[ -n "$_MANUAL_PKG_PATH" ]] || die "--file requer um caminho de arquivo."
+                ;;
             --help|-h)
-                echo "Uso: install.sh [install|update|uninstall] [--auto] [--quiet]"
+                echo "Uso: install.sh [install|update|uninstall|local] [--auto] [--quiet] [--file <caminho>]"
+                echo ""
+                echo "  install    Instala o WSSH-VPN"
+                echo "  update     Atualiza para a versão mais recente"
+                echo "  uninstall  Remove o WSSH-VPN"
+                echo "  local      Instala/atualiza usando arquivo local (sem download)"
+                echo ""
+                echo "  --file <caminho>  Arquivo baixado manualmente (usa com 'local' ou 'install')"
+                echo "  --auto            Usa valores padrão sem perguntar"
+                echo "  --quiet           Suprime banner"
+                echo ""
+                echo "Exemplo:"
+                echo "  wget ${UPDATE_API}/1.2.3/download"
+                echo "  sudo bash install.sh local --file ./download"
                 exit 0
                 ;;
             *) _EXTRA_ARGS+=("$1") ;;
@@ -148,11 +246,6 @@ _parse_args() {
 }
 
 # ── Leitura de input (pipe-safe: sempre via /dev/tty) ─────────────────────────
-#
-# _ask VAR "Prompt" "default"           → leitura normal
-# _ask_secret VAR "Prompt" "default"   → leitura oculta (senha)
-# _ask_confirm "Mensagem"              → retorna 0=sim 1=não
-#
 _ask() {
     local var="$1" prompt="$2" default="${3:-}"
     if [[ "$AUTO_MODE" == true ]]; then
@@ -215,19 +308,16 @@ require_cmd() {
 preflight_check() {
     info "Verificando pré-requisitos do sistema..."
 
-    # Systemd
     if ! command -v systemctl &>/dev/null; then
         die "systemd não encontrado. O WSSH-VPN requer systemd."
     fi
 
-    # Espaço em disco (mínimo 200 MB em /usr)
     local free_kb
     free_kb=$(df -k /usr/local/bin | awk 'NR==2{print $4}')
     if [[ "$free_kb" -lt 204800 ]]; then
         die "Espaço insuficiente em /usr (disponível: $((free_kb / 1024)) MB, mínimo: 200 MB)."
     fi
 
-    # Dependências críticas
     for dep in jq curl; do
         require_cmd "$dep"
     done
@@ -242,7 +332,6 @@ detect_platform() {
     machine=$(uname -m)
     os_raw=$(uname -s | tr '[:upper:]' '[:lower:]')
 
-    # Android via Termux
     if [[ -d "/data/data/com.termux" ]]; then
         os_raw="android"
     fi
@@ -267,24 +356,21 @@ detect_platform() {
     log "Plataforma: ${PLATFORM_OS}/${PLATFORM_ARCH} → binário: ${BINARY_NAME}"
 }
 
-# ── Versão instalada (se houver) ──────────────────────────────────────────────
+# ── Versão instalada ──────────────────────────────────────────────────────────
 get_installed_version() {
-    # Suporta versões como 1.2.3, 1.2.3.alpha.70, 1.2.3-beta.4
     if [[ -x "$BINARY_TARGET" ]]; then
         "$BINARY_TARGET" --version 2>/dev/null \
         | grep -oE '[0-9]+\.[0-9]+\.[0-9]+([.a-zA-Z0-9-]*)?' \
         | head -1 \
         || echo ""
     else
-        echo "" >&2
+        echo ""
     fi
 }
 
 # ── Obtém versão mais recente da API ─────────────────────────────────────────
 fetch_latest_version() {
-    # Retorna APENAS a versão no stdout. Toda mensagem vai para stderr via info/warn.
     local version=""
-
     info "Consultando versão mais recente em ${UPDATE_API}..."
 
     version=$(
@@ -292,15 +378,12 @@ fetch_latest_version() {
         | jq -r '.data.version // empty' 2>/dev/null \
         || true
     )
-
-    # Sanitiza: remove espaços, newlines e caracteres de controle
     version=$(printf '%s' "$version" | tr -d '[:space:][:cntrl:]')
 
     if [[ -z "$version" || "$version" == "null" ]]; then
         warn "API indisponível. Informe a versão manualmente."
         _ask version "Versão (ex: 1.2.3)" ""
         [[ -n "$version" ]] || die "Versão não informada."
-        # Sanitiza input do usuário também
         version=$(printf '%s' "$version" | tr -d '[:space:][:cntrl:]')
     fi
 
@@ -308,16 +391,10 @@ fetch_latest_version() {
     printf '%s' "$version"
 }
 
-# ── Compara versões (A < B → retorna 0; A >= B → retorna 1) ──────────────────
-#
-# Suporta: 1.2.3  1.2.3.alpha.70  1.2.3-beta.4
-# Estratégia: compara segmento a segmento; segmentos não-numéricos (alpha, beta)
-# são tratados como 0 (versão de pré-release < release do mesmo número).
-#
+# ── Compara versões ───────────────────────────────────────────────────────────
 _version_lt() {
     [[ "$1" == "$2" ]] && return 1
 
-    # Normaliza separadores (. e -) e converte para array
     local IFS=.
     local va vb
     va=$(printf '%s' "$1" | tr '-' '.')
@@ -330,14 +407,10 @@ _version_lt() {
     for (( i=0; i<max; i++ )); do
         av="${a[$i]:-0}"
         bv="${b[$i]:-0}"
-
-        # Se segmento não for numérico puro, usa 0 (alpha < release)
         [[ "$av" =~ ^[0-9]+$ ]] || av=0
         [[ "$bv" =~ ^[0-9]+$ ]] || bv=0
-
         av=$((10#$av))
         bv=$((10#$bv))
-
         (( av < bv )) && return 0
         (( av > bv )) && return 1
     done
@@ -345,35 +418,92 @@ _version_lt() {
 }
 
 # ── Download e extração do pacote ─────────────────────────────────────────────
+#
+# Se _MANUAL_PKG_PATH estiver definido, usa o arquivo local sem baixar.
+# Caso contrário, faz download com barra de progresso.
+#
 download_package() {
     local version="$1"
-    local url="${UPDATE_API}/${version}/download"
-    local package_file; package_file=$(_tmp)
     local extract_dir="/tmp/wssh-extract"
-
-    info "Baixando wssh-vpn v${version} (${BINARY_NAME})..."
-    log "URL: ${url}"
 
     rm -rf "$extract_dir"
     mkdir -p "$extract_dir"
 
+    # ── Modo arquivo local ────────────────────────────────────────────────────
+    if [[ -n "$_MANUAL_PKG_PATH" ]]; then
+        info "Usando pacote local: ${_MANUAL_PKG_PATH}"
+        local fsize
+        fsize=$(stat -c%s "$_MANUAL_PKG_PATH" 2>/dev/null || echo 0)
+        info "Tamanho: $(( fsize / 1024 / 1024 )) MB"
+
+        info "Validando integridade..."
+        tar -tzf "$_MANUAL_PKG_PATH" >/dev/null 2>&1 \
+            || die "Arquivo inválido: não é um tar.gz válido: ${_MANUAL_PKG_PATH}"
+
+        info "Extraindo pacote..."
+        tar -xzf "$_MANUAL_PKG_PATH" -C "$extract_dir" \
+            || die "Falha ao extrair: ${_MANUAL_PKG_PATH}"
+
+        if [[ ! -f "${extract_dir}/${BINARY_NAME}" ]]; then
+            local available
+            available=$(find "$extract_dir" -maxdepth 2 -type f | head -10 | tr '\n' ' ')
+            die "Binário '${BINARY_NAME}' não encontrado no pacote. Arquivos disponíveis: ${available}"
+        fi
+
+        chmod +x "${extract_dir}/${BINARY_NAME}"
+        ok "Pacote local extraído — binário '${BINARY_NAME}' pronto."
+        return 0
+    fi
+
+    # ── Modo download ─────────────────────────────────────────────────────────
+    local url="${UPDATE_API}/${version}/download"
+    local package_file; package_file=$(_tmp)
+
+    info "Baixando wssh-vpn v${version} (${BINARY_NAME})..."
+    log "URL: ${url}"
+
+    # Consulta tamanho via HEAD para exibir % real
+    info "Consultando tamanho do arquivo..."
+    local total_size
+    total_size=$(_get_remote_size "$url")
+
+    if [[ "$total_size" -gt 0 ]]; then
+        local total_mb=$(( total_size / 1024 / 1024 ))
+        info "Tamanho: ${total_mb} MB — progresso com % habilitado"
+    else
+        info "Tamanho: não informado pelo servidor — mostrando bytes baixados"
+    fi
+
+    echo "" >&2
+
     local attempt downloaded=false
     for attempt in 1 2 3; do
-        info "Download — tentativa ${attempt}/3..."
-        if _curl_download "$package_file" "$url" && [[ -s "$package_file" ]]; then
+        [[ $attempt -gt 1 ]] && info "Tentativa ${attempt}/3..."
+
+        if _curl_download_progress "$package_file" "$url" "$total_size" \
+                && [[ -s "$package_file" ]]; then
             downloaded=true
+            local final_size
+            final_size=$(stat -c%s "$package_file" 2>/dev/null || echo 0)
+            ok "Download concluído — $(( final_size / 1024 / 1024 )) MB"
             break
         fi
+
         warn "Tentativa ${attempt} falhou."
         rm -f "$package_file"
         [[ "$attempt" -lt 3 ]] && sleep 3
     done
 
-    [[ "$downloaded" == true ]] || die "Falha no download após 3 tentativas. URL: ${url}"
+    echo "" >&2
+    [[ "$downloaded" == true ]] || {
+        warn "Download falhou após 3 tentativas."
+        warn "Você pode baixar manualmente e usar a opção 4 do menu:"
+        echo -e "    ${DIM}wget ${url}${NC}" >&2
+        echo -e "    ${DIM}sudo bash install.sh local --file ./download${NC}" >&2
+        die "Falha no download. URL: ${url}"
+    }
 
-    ok "Download concluído."
-
-    # Validação do pacote
+    # Validação
     info "Validando integridade do pacote..."
     if ! tar -tzf "$package_file" >/dev/null 2>&1; then
         local type=""
@@ -386,7 +516,6 @@ download_package() {
     tar -xzf "$package_file" -C "$extract_dir" \
         || die "Falha ao extrair o pacote."
 
-    # Verifica binário
     if [[ ! -f "${extract_dir}/${BINARY_NAME}" ]]; then
         local available
         available=$(find "$extract_dir" -maxdepth 2 -type f | head -10 | tr '\n' ' ')
@@ -429,7 +558,6 @@ install_vpn() {
     sep
 
     # ── Parâmetros de Banco de Dados ─────────────────────────────────────────
-
     echo -e "\n${BOLD}  Banco de Dados (PostgreSQL)${NC}" >&2
     local DB_USER DB_PASS
 
@@ -442,7 +570,6 @@ install_vpn() {
     echo "" >&2
 
     # ── Parâmetros do Painel ─────────────────────────────────────────────────
-
     echo -e "${BOLD}  Painel Administrativo${NC}" >&2
     local PANEL_USER PANEL_PASS
 
@@ -467,7 +594,6 @@ install_vpn() {
     rm -f /etc/systemd/system/wssh-vpn.service
     systemctl daemon-reload 2>/dev/null || true
 
-    # Mata processos residuais
     local pids
     pids=$(pgrep -x wssh-vpn 2>/dev/null || true)
     if [[ -n "$pids" ]]; then
@@ -495,7 +621,6 @@ install_vpn() {
     systemctl start  postgresql >/dev/null 2>&1 || die "Não foi possível iniciar o PostgreSQL."
     sleep 2
 
-    # Cria ou atualiza o usuário
     sudo -u postgres psql -qc "CREATE USER \"${DB_USER}\" SUPERUSER PASSWORD '${DB_PASS}';" \
         >/dev/null 2>&1 \
     || sudo -u postgres psql -qc "ALTER  USER \"${DB_USER}\" SUPERUSER PASSWORD '${DB_PASS}';" \
@@ -516,20 +641,17 @@ install_vpn() {
 
     mkdir -p "${CONFIG_DIR}"
 
-    # Host key Ed25519 (mais compacta e segura que RSA-2048)
     if [[ ! -f "${CONFIG_DIR}/ssh_host_key" ]]; then
         ssh-keygen -q -t ed25519 -f "${CONFIG_DIR}/ssh_host_key" -N "" \
             || die "Falha ao gerar a host key SSH."
     fi
 
-    # Inicializa config.json se necessário
     [[ -f "${CONFIG_DIR}/config.json" ]] || echo '{}' > "${CONFIG_DIR}/config.json"
 
-    # Grava credenciais em base64 (evita problemas com chars especiais no JSON)
     local tmp_cfg; tmp_cfg=$(_tmp)
     jq \
-        --arg db_user_b64   "$(printf '%s' "$DB_USER"   | base64 -w0)" \
-        --arg db_pass_b64   "$(printf '%s' "$DB_PASS"   | base64 -w0)" \
+        --arg db_user_b64    "$(printf '%s' "$DB_USER"    | base64 -w0)" \
+        --arg db_pass_b64    "$(printf '%s' "$DB_PASS"    | base64 -w0)" \
         --arg admin_user_b64 "$(printf '%s' "$PANEL_USER" | base64 -w0)" \
         --arg admin_pass_b64 "$(printf '%s' "$PANEL_PASS" | base64 -w0)" \
         '
@@ -540,7 +662,6 @@ install_vpn() {
         ' "${CONFIG_DIR}/config.json" > "$tmp_cfg" \
     && mv "$tmp_cfg" "${CONFIG_DIR}/config.json"
 
-    # snapshot.json (auditoria de instalação)
     if [[ ! -f "${CONFIG_DIR}/snapshot.json" ]]; then
         local db_pass_hash
         db_pass_hash=$(printf '%s' "$DB_PASS" | sha256sum | awk '{print $1}')
@@ -552,7 +673,6 @@ install_vpn() {
         > "${CONFIG_DIR}/snapshot.json"
     fi
 
-    # Copia licença existente, se houver
     mkdir -p "${CONFIG_DIR}/.license"
     for OLD_DIR in ".license" "cmd/build/.license" "../.license"; do
         if [[ -d "$OLD_DIR" && -f "$OLD_DIR/uuid" ]]; then
@@ -564,18 +684,26 @@ install_vpn() {
     ok "Configuração criada em ${CONFIG_DIR}."
 
     # ── [4/6] Binário ────────────────────────────────────────────────────────
-    echo -e "${YELLOW}[4/6]${NC} Baixando binário..." >&2
+    echo -e "${YELLOW}[4/6]${NC} Obtendo binário..." >&2
 
     local LATEST_VERSION
-    LATEST_VERSION=$(fetch_latest_version) \
-        || die "Não foi possível obter a versão mais recente."
+    if [[ -n "$_MANUAL_PKG_PATH" ]]; then
+        LATEST_VERSION="local"
+        info "Usando arquivo local: ${_MANUAL_PKG_PATH}"
+    else
+        LATEST_VERSION=$(fetch_latest_version) \
+            || die "Não foi possível obter a versão mais recente."
+    fi
 
     download_package "$LATEST_VERSION" \
-        || die "Falha ao obter o pacote v${LATEST_VERSION}."
+        || die "Falha ao obter o pacote."
 
     mv "/tmp/wssh-extract/${BINARY_NAME}" "$BINARY_TARGET"
     chmod +x "$BINARY_TARGET"
-    ok "Binário instalado em ${BINARY_TARGET} (v${LATEST_VERSION})."
+
+    local final_ver
+    final_ver=$(get_installed_version 2>/dev/null || echo "$LATEST_VERSION")
+    ok "Binário instalado em ${BINARY_TARGET} (v${final_ver})."
 
     # ── [5/6] Unit systemd ───────────────────────────────────────────────────
     echo -e "${YELLOW}[5/6]${NC} Criando serviço systemd..." >&2
@@ -608,7 +736,6 @@ SyslogIdentifier=wssh-vpn
 WantedBy=multi-user.target
 UNIT_EOF
 
-    # Substitui placeholders de forma segura (sem risco de injeção)
     sed -i \
         -e "s|__DB_NAME__|${DB_NAME}|g" \
         -e "s|__DB_USER__|${DB_USER}|g" \
@@ -625,7 +752,6 @@ UNIT_EOF
     systemctl enable wssh-vpn >/dev/null 2>&1
     systemctl restart wssh-vpn 2>/dev/null || true
 
-    # Aguarda inicialização (até 15 s)
     local i ready=false
     for i in {1..15}; do
         if systemctl is-active --quiet wssh-vpn; then
@@ -644,7 +770,7 @@ UNIT_EOF
     echo -e "${GREEN}╔═══════════════════════════════════════════════════════════╗${NC}" >&2
     echo -e "${GREEN}║           INSTALAÇÃO CONCLUÍDA COM SUCESSO!               ║${NC}" >&2
     echo -e "${GREEN}╠═══════════════════════════════════════════════════════════╣${NC}" >&2
-    printf  "${GREEN}║${NC}  Versão    : %-43s${GREEN}║${NC}\n" "v${LATEST_VERSION}" >&2
+    printf  "${GREEN}║${NC}  Versão    : %-43s${GREEN}║${NC}\n" "v${final_ver}" >&2
     printf  "${GREEN}║${NC}  Serviço   : %-43s${GREEN}║${NC}\n" "$(systemctl is-active wssh-vpn 2>/dev/null || echo 'verificar')" >&2
     printf  "${GREEN}║${NC}  Log       : %-43s${GREEN}║${NC}\n" "${LOG_FILE}" >&2
     echo -e "${GREEN}╠═══════════════════════════════════════════════════════════╣${NC}" >&2
@@ -653,7 +779,7 @@ UNIT_EOF
     echo -e "${GREEN}╚═══════════════════════════════════════════════════════════╝${NC}" >&2
     echo "" >&2
 
-    log "Instalação concluída. Versão: ${LATEST_VERSION}"
+    log "Instalação concluída. Versão: ${final_ver}"
 }
 
 # =============================================================================
@@ -766,7 +892,6 @@ uninstall_vpn() {
     _ask_confirm "Confirma a desinstalação?" "n" \
         || { warn "Desinstalação cancelada."; return 0; }
 
-    # Lê usuário do config (com fallback)
     local cfg_db_user cfg_db_name
     cfg_db_user=$(
         jq -r '.db_user_b64 // empty' "${CONFIG_DIR}/config.json" 2>/dev/null \
@@ -814,28 +939,169 @@ uninstall_vpn() {
 }
 
 # =============================================================================
+#  INSTALAÇÃO / ATUALIZAÇÃO A PARTIR DE ARQUIVO LOCAL  (opção 4)
+# =============================================================================
+#
+# Use quando o download automático falhar.
+# Baixe o pacote manualmente e informe o caminho:
+#
+#   wget https://update.mtwtech.shop/<versão>/download
+#   sudo bash install.sh local --file ./download
+#
+install_local_package() {
+    step "Instalar / Atualizar a partir de arquivo local..."
+    sep
+
+    echo -e "${BOLD}  Use esta opção quando o download automático falhar.${NC}" >&2
+    echo -e "${DIM}  Baixe o pacote manualmente e informe o caminho abaixo.${NC}" >&2
+    echo -e "${DIM}  Exemplo: wget ${UPDATE_API}/<versão>/download${NC}" >&2
+    echo "" >&2
+
+    # Se ainda não foi fornecido via --file, pede interativamente
+    if [[ -z "$_MANUAL_PKG_PATH" ]]; then
+        # Procura arquivo 'download' nos locais comuns
+        local default_path=""
+        for candidate in \
+            "./download" \
+            "${HOME}/download" \
+            "/root/download" \
+            "/tmp/wssh-download"
+        do
+            if [[ -f "$candidate" ]]; then
+                local sz
+                sz=$(stat -c%s "$candidate" 2>/dev/null || echo 0)
+                info "Arquivo encontrado: ${candidate} ($(( sz / 1024 / 1024 )) MB)"
+                default_path="$candidate"
+                break
+            fi
+        done
+
+        local pkg_path=""
+        _ask pkg_path "Caminho do arquivo baixado" "$default_path"
+        [[ -n "$pkg_path" ]] || die "Caminho não informado."
+        _MANUAL_PKG_PATH="$pkg_path"
+    fi
+
+    [[ -f "$_MANUAL_PKG_PATH" ]] \
+        || die "Arquivo não encontrado: ${_MANUAL_PKG_PATH}"
+
+    local fsize
+    fsize=$(stat -c%s "$_MANUAL_PKG_PATH" 2>/dev/null || echo 0)
+    info "Arquivo: ${_MANUAL_PKG_PATH}  ($(( fsize / 1024 / 1024 )) MB)"
+
+    # Valida que é tar.gz antes de qualquer coisa
+    info "Validando integridade do arquivo..."
+    if ! tar -tzf "$_MANUAL_PKG_PATH" >/dev/null 2>&1; then
+        die "Arquivo inválido: não parece ser um pacote tar.gz do WSSH-VPN." \
+            "Verifique se o download foi concluído (tamanho esperado: ~148 MB)."
+    fi
+    ok "Arquivo válido."
+    echo "" >&2
+
+    # ── Decide fluxo: primeira instalação ou upgrade ──────────────────────
+    if [[ -x "$BINARY_TARGET" ]]; then
+        info "WSSH-VPN já instalado — substituindo binário (configuração preservada)."
+        sep
+        _local_upgrade
+    else
+        info "WSSH-VPN não instalado — iniciando instalação completa com arquivo local."
+        sep
+        install_vpn
+    fi
+}
+
+# Substitui apenas o binário, preservando config/DB/systemd existentes
+_local_upgrade() {
+    step "Upgrade manual do binário..."
+
+    # Extrai usando o caminho já definido em _MANUAL_PKG_PATH
+    download_package "local"
+
+    local NEW_BINARY="/tmp/wssh-extract/${BINARY_NAME}"
+    [[ -f "$NEW_BINARY" ]] || die "Binário '${BINARY_NAME}' não encontrado no pacote extraído."
+
+    local prev_ver
+    prev_ver=$(get_installed_version)
+
+    # Para serviço e faz backup
+    systemctl stop wssh-vpn 2>/dev/null || true
+
+    rm -f "$BACKUP_BINARY"
+    if [[ -f "$BINARY_TARGET" ]]; then
+        cp -a "$BINARY_TARGET" "$BACKUP_BINARY" \
+            || warn "Não foi possível criar backup do binário anterior."
+    fi
+
+    # Instala novo binário
+    cp "$NEW_BINARY" "$BINARY_TARGET" || {
+        warn "Falha ao copiar binário. Restaurando versão anterior..."
+        [[ -f "$BACKUP_BINARY" ]] && cp -a "$BACKUP_BINARY" "$BINARY_TARGET" && chmod +x "$BINARY_TARGET"
+        systemctl start wssh-vpn 2>/dev/null || true
+        die "Upgrade manual falhou. Versão anterior restaurada."
+    }
+    chmod +x "$BINARY_TARGET"
+
+    # Tenta iniciar com novo binário
+    if ! systemctl start wssh-vpn 2>/dev/null; then
+        warn "Novo binário não iniciou. Restaurando versão anterior..."
+        [[ -f "$BACKUP_BINARY" ]] && cp -a "$BACKUP_BINARY" "$BINARY_TARGET" && chmod +x "$BINARY_TARGET"
+        systemctl start wssh-vpn 2>/dev/null || true
+        die "Rollback executado. Verifique: journalctl -u wssh-vpn -n 50 --no-pager"
+    fi
+
+    # Aguarda estabilização
+    local i ready=false
+    for i in {1..10}; do
+        systemctl is-active --quiet wssh-vpn && { ready=true; break; }
+        sleep 1
+    done
+
+    local new_ver
+    new_ver=$(get_installed_version 2>/dev/null || echo "desconhecida")
+
+    sep
+    echo -e "${GREEN}╔═══════════════════════════════════════════════════════════╗${NC}" >&2
+    echo -e "${GREEN}║        UPGRADE MANUAL CONCLUÍDO COM SUCESSO!              ║${NC}" >&2
+    echo -e "${GREEN}╠═══════════════════════════════════════════════════════════╣${NC}" >&2
+    printf  "${GREEN}║${NC}  Versão anterior : %-39s${GREEN}║${NC}\n" "${prev_ver:-desconhecida}" >&2
+    printf  "${GREEN}║${NC}  Versão atual    : %-39s${GREEN}║${NC}\n" "${new_ver}" >&2
+    printf  "${GREEN}║${NC}  Origem          : %-39s${GREEN}║${NC}\n" "$(basename "$_MANUAL_PKG_PATH")" >&2
+    printf  "${GREEN}║${NC}  Serviço         : %-39s${GREEN}║${NC}\n" "$(systemctl is-active wssh-vpn 2>/dev/null || echo 'verificar')" >&2
+    echo -e "${GREEN}╚═══════════════════════════════════════════════════════════╝${NC}" >&2
+    echo "" >&2
+
+    [[ "$ready" != true ]] && {
+        warn "Serviço pode não estar totalmente ativo."
+        echo -e "    ${DIM}journalctl -u wssh-vpn -n 30 --no-pager${NC}" >&2
+    }
+
+    log "Upgrade manual: ${_MANUAL_PKG_PATH} — v${prev_ver:-?} → v${new_ver}"
+}
+
+# =============================================================================
 #  MENU INTERATIVO
 # =============================================================================
 show_menu() {
     while true; do
-        {
-            echo -e "${CYAN}  O que você deseja fazer?${NC}" >&2
-            echo "" >&2
-            echo -e "    ${YELLOW}[1]${NC} Instalar   WSSH-VPN" >&2
-            echo -e "    ${YELLOW}[2]${NC} Atualizar  WSSH-VPN" >&2
-            echo -e "    ${YELLOW}[3]${NC} Desinstalar WSSH-VPN" >&2
-            echo -e "    ${YELLOW}[0]${NC} Sair" >&2
-            echo "" >&2
-        } >&2
+        echo -e "${CYAN}  O que você deseja fazer?${NC}" >&2
+        echo "" >&2
+        echo -e "    ${YELLOW}[1]${NC} Instalar    WSSH-VPN" >&2
+        echo -e "    ${YELLOW}[2]${NC} Atualizar   WSSH-VPN" >&2
+        echo -e "    ${YELLOW}[3]${NC} Desinstalar WSSH-VPN" >&2
+        echo -e "    ${YELLOW}[4]${NC} Instalar / Atualizar a partir de ${BOLD}arquivo local${NC}" >&2
+        echo -e "    ${DIM}      (use quando o download automático falhar)${NC}" >&2
+        echo -e "    ${YELLOW}[0]${NC} Sair" >&2
+        echo "" >&2
 
         local option
-        read -r -p "$(echo -e "  ${BOLD}→${NC} Opção: " >&2; echo -n "")" option < /dev/tty >&2
+        read -r -p "$(echo -e "  ${BOLD}→${NC} Opção: ")" option < /dev/tty
 
         echo "" >&2
         case "$option" in
-            1) install_vpn;   break ;;
-            2) update_vpn;    break ;;
-            3) uninstall_vpn; break ;;
+            1) install_vpn;          break ;;
+            2) update_vpn;           break ;;
+            3) uninstall_vpn;        break ;;
+            4) install_local_package; break ;;
             0) info "Saindo."; exit 0 ;;
             *) warn "Opção inválida: '${option}'. Tente novamente."; echo "" >&2 ;;
         esac
@@ -854,12 +1120,14 @@ main() {
     show_banner
 
     log "=== Installer v${INSTALLER_VERSION} iniciado. OS=${PLATFORM_OS} ARCH=${PLATFORM_ARCH} ==="
+    [[ -n "$_MANUAL_PKG_PATH" ]] && log "Arquivo local: ${_MANUAL_PKG_PATH}"
 
     case "${_ACTION:-}" in
-        install)   install_vpn   ;;
-        update)    update_vpn    ;;
-        uninstall) uninstall_vpn ;;
-        *)         show_menu     ;;
+        install)   install_vpn            ;;
+        update)    update_vpn             ;;
+        uninstall) uninstall_vpn          ;;
+        local)     install_local_package  ;;
+        *)         show_menu              ;;
     esac
 }
 
