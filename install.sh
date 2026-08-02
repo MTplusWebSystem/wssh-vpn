@@ -7,14 +7,14 @@
 #    # Modo não-interativo:
 #    curl -fsSL ... | sudo bash -s -- install --auto
 #    # Instalar de arquivo local:
-#    sudo bash install.sh local --file /root/download
+#    sudo bash install.sh local --file /root/wssh-vpn.tar.gz
 # =============================================================================
 set -euo pipefail
 IFS=$'\n\t'
 export DEBIAN_FRONTEND=noninteractive
 
 # ── Versão do installer ───────────────────────────────────────────────────────
-readonly INSTALLER_VERSION="2.1.0"
+readonly INSTALLER_VERSION="2.1.1"
 readonly INSTALL_DIR="/usr/local/bin"
 readonly CONFIG_DIR="/etc/wssh"
 readonly DB_NAME="wssh_db"
@@ -22,6 +22,9 @@ readonly BINARY_TARGET="${INSTALL_DIR}/wssh-vpn"
 readonly BACKUP_BINARY="${INSTALL_DIR}/wssh-vpn.bak"
 readonly UPDATE_API="https://update.mtwtech.shop"
 readonly LOG_FILE="/var/log/wssh-vpn-install.log"
+
+# Nome canônico do pacote — todos os arquivos são normalizados para este nome
+readonly PKG_FILENAME="wssh-vpn.tar.gz"
 
 # ── Flags de controle ─────────────────────────────────────────────────────────
 AUTO_MODE=false       # --auto: usa defaults sem perguntar
@@ -120,16 +123,6 @@ _get_remote_size() {
 }
 
 # ── Monitor de progresso de download ─────────────────────────────────────────
-# Executa em background enquanto o curl baixa para <arquivo>.
-# Mostra % real se <total_bytes> > 0, ou spinner+bytes caso contrário.
-#
-# Uso:
-#   _progress_bar "$pkg_file" "$total_size" &
-#   _PROG_PID=$!
-#   ... curl download ...
-#   kill "$_PROG_PID" 2>/dev/null; wait "$_PROG_PID" 2>/dev/null || true
-#   printf "\r%80s\r" "" >&2
-#
 _progress_bar() {
     local file="$1" total="${2:-0}"
     local start=$SECONDS size elapsed speed_bps speed_kbps mb_int mb_dec pct filled bar i
@@ -167,10 +160,8 @@ _progress_bar() {
 
 # ── Download com progresso + fallback SSL ────────────────────────────────────
 _curl_download_progress() {
-    # _curl_download_progress <output_file> <url> [total_size]
     local output_file="$1" url="$2" total_size="${3:-0}"
 
-    # Inicia monitor de progresso em background
     _progress_bar "$output_file" "$total_size" &
     _PROG_PID=$!
 
@@ -195,13 +186,48 @@ _curl_download_progress() {
         }
     fi
 
-    # Para o monitor e limpa a linha
     kill "$_PROG_PID" 2>/dev/null
     wait "$_PROG_PID" 2>/dev/null || true
     _PROG_PID=""
     printf "\r%80s\r" "" >&2
 
     [[ "$dl_ok" == true ]]
+}
+
+# =============================================================================
+#  NORMALIZAÇÃO DO PACOTE — garante que _MANUAL_PKG_PATH aponta para
+#  um arquivo chamado wssh-vpn.tar.gz.
+#
+#  Regras:
+#    1. Se o arquivo já se chama wssh-vpn.tar.gz → usa direto.
+#    2. Se o arquivo tem outro nome (ex: "download") → copia/renomeia
+#       para o mesmo diretório com o nome wssh-vpn.tar.gz e atualiza
+#       _MANUAL_PKG_PATH para o novo caminho.
+# =============================================================================
+_normalize_pkg_path() {
+    local src="$_MANUAL_PKG_PATH"
+
+    [[ -f "$src" ]] || die "Arquivo não encontrado: ${src}"
+
+    local src_dir src_base canonical
+
+    src_dir=$(dirname "$src")
+    src_base=$(basename "$src")
+    canonical="${src_dir}/${PKG_FILENAME}"
+
+    if [[ "$src_base" == "$PKG_FILENAME" ]]; then
+        # Já tem o nome correto — nada a fazer
+        return 0
+    fi
+
+    # Arquivo com nome diferente → copia para wssh-vpn.tar.gz no mesmo dir
+    info "Renomeando '${src_base}' → '${PKG_FILENAME}'..."
+    cp -a "$src" "$canonical" \
+        || die "Não foi possível renomear o arquivo para ${PKG_FILENAME}."
+
+    _MANUAL_PKG_PATH="$canonical"
+    ok "Arquivo normalizado: ${_MANUAL_PKG_PATH}"
+    log "Pacote normalizado: ${src} → ${_MANUAL_PKG_PATH}"
 }
 
 # ── Parse de argumentos ───────────────────────────────────────────────────────
@@ -230,13 +256,13 @@ _parse_args() {
                 echo "  uninstall  Remove o WSSH-VPN"
                 echo "  local      Instala/atualiza usando arquivo local (sem download)"
                 echo ""
-                echo "  --file <caminho>  Arquivo baixado manualmente (usa com 'local' ou 'install')"
+                echo "  --file <caminho>  Arquivo baixado manualmente (ex: wssh-vpn.tar.gz ou download)"
                 echo "  --auto            Usa valores padrão sem perguntar"
                 echo "  --quiet           Suprime banner"
                 echo ""
                 echo "Exemplo:"
-                echo "  wget ${UPDATE_API}/1.2.3/download"
-                echo "  sudo bash install.sh local --file ./download"
+                echo "  wget ${UPDATE_API}/1.2.3/download -O wssh-vpn.tar.gz"
+                echo "  sudo bash install.sh local --file ./wssh-vpn.tar.gz"
                 exit 0
                 ;;
             *) _EXTRA_ARGS+=("$1") ;;
@@ -420,7 +446,7 @@ _version_lt() {
 # ── Download e extração do pacote ─────────────────────────────────────────────
 #
 # Se _MANUAL_PKG_PATH estiver definido, usa o arquivo local sem baixar.
-# Caso contrário, faz download com barra de progresso.
+# Caso contrário, faz download com barra de progresso salvando como wssh-vpn.tar.gz.
 #
 download_package() {
     local version="$1"
@@ -457,12 +483,20 @@ download_package() {
 
     # ── Modo download ─────────────────────────────────────────────────────────
     local url="${UPDATE_API}/${version}/download"
-    local package_file; package_file=$(_tmp)
 
-    info "Baixando wssh-vpn v${version} (${BINARY_NAME})..."
+    # Salva sempre como wssh-vpn.tar.gz no diretório de trabalho atual
+    local package_file
+    if [[ -w "$(pwd)" ]]; then
+        package_file="$(pwd)/${PKG_FILENAME}"
+    else
+        package_file="/tmp/${PKG_FILENAME}"
+    fi
+    # Registra para cleanup automático
+    _TMP_FILES+=("$package_file")
+
+    info "Baixando wssh-vpn v${version} → ${PKG_FILENAME} (${BINARY_NAME})..."
     log "URL: ${url}"
 
-    # Consulta tamanho via HEAD para exibir % real
     info "Consultando tamanho do arquivo..."
     local total_size
     total_size=$(_get_remote_size "$url")
@@ -485,7 +519,7 @@ download_package() {
             downloaded=true
             local final_size
             final_size=$(stat -c%s "$package_file" 2>/dev/null || echo 0)
-            ok "Download concluído — $(( final_size / 1024 / 1024 )) MB"
+            ok "Download concluído → ${PKG_FILENAME} ($(( final_size / 1024 / 1024 )) MB)"
             break
         fi
 
@@ -498,8 +532,8 @@ download_package() {
     [[ "$downloaded" == true ]] || {
         warn "Download falhou após 3 tentativas."
         warn "Você pode baixar manualmente e usar a opção 4 do menu:"
-        echo -e "    ${DIM}wget ${url}${NC}" >&2
-        echo -e "    ${DIM}sudo bash install.sh local --file ./download${NC}" >&2
+        echo -e "    ${DIM}wget ${url} -O ${PKG_FILENAME}${NC}" >&2
+        echo -e "    ${DIM}sudo bash install.sh local --file ./${PKG_FILENAME}${NC}" >&2
         die "Falha no download. URL: ${url}"
     }
 
@@ -824,7 +858,6 @@ update_vpn() {
     systemctl stop wssh-vpn \
         || die "Não foi possível parar o serviço. Abortando para preservar instalação atual."
 
-    # Kill forçado em processos residuais (evita "Text file busy")
     local pids
     pids=$(pgrep -x wssh-vpn 2>/dev/null || true)
     if [[ -n "$pids" ]]; then
@@ -839,7 +872,6 @@ update_vpn() {
     cp -a "$BINARY_TARGET" "$BACKUP_BINARY" \
         || { systemctl start wssh-vpn 2>/dev/null; die "Falha ao criar backup do binário."; }
 
-    # mv atômico: evita "Text file busy" que ocorre com cp direto
     local tmp_new="${BINARY_TARGET}.new"
     cp -a "$NEW_BINARY" "$tmp_new" && chmod +x "$tmp_new" \
         || { rm -f "$tmp_new"; systemctl start wssh-vpn 2>/dev/null; die "Falha ao preparar novo binário."; }
@@ -956,33 +988,37 @@ uninstall_vpn() {
 
 # =============================================================================
 #  INSTALAÇÃO / ATUALIZAÇÃO A PARTIR DE ARQUIVO LOCAL  (opção 4)
+#
+#  Aceita tanto wssh-vpn.tar.gz quanto o nome "download" (legado).
+#  Qualquer arquivo encontrado é normalizado para wssh-vpn.tar.gz antes
+#  de prosseguir.
 # =============================================================================
-#
-# Use quando o download automático falhar.
-# Baixe o pacote manualmente e informe o caminho:
-#
-#   wget https://update.mtwtech.shop/<versão>/download
-#   sudo bash install.sh local --file ./download
-#
 install_local_package() {
     step "Instalar / Atualizar a partir de arquivo local..."
     sep
 
     echo -e "${BOLD}  Use esta opção quando o download automático falhar.${NC}" >&2
-    echo -e "${DIM}  Baixe o pacote manualmente e informe o caminho abaixo.${NC}" >&2
-    echo -e "${DIM}  Exemplo: wget ${UPDATE_API}/<versão>/download${NC}" >&2
+    echo -e "${DIM}  Baixe o pacote e informe o caminho abaixo.${NC}" >&2
+    echo -e "${DIM}  Exemplo: wget ${UPDATE_API}/<versão>/download -O ${PKG_FILENAME}${NC}" >&2
     echo "" >&2
 
-    # Se ainda não foi fornecido via --file, pede interativamente
+    # Se ainda não foi fornecido via --file, procura automaticamente
     if [[ -z "$_MANUAL_PKG_PATH" ]]; then
-        # Procura arquivo 'download' nos locais comuns
         local default_path=""
-        for candidate in \
-            "./download" \
-            "${HOME}/download" \
-            "/root/download" \
+
+        # Candidatos: wssh-vpn.tar.gz tem prioridade; "download" é fallback legado
+        local -a candidates=(
+            "./wssh-vpn.tar.gz"
+            "${HOME}/wssh-vpn.tar.gz"
+            "/root/wssh-vpn.tar.gz"
+            "/tmp/wssh-vpn.tar.gz"
+            "./download"
+            "${HOME}/download"
+            "/root/download"
             "/tmp/wssh-download"
-        do
+        )
+
+        for candidate in "${candidates[@]}"; do
             if [[ -f "$candidate" ]]; then
                 local sz
                 sz=$(stat -c%s "$candidate" 2>/dev/null || echo 0)
@@ -1000,6 +1036,9 @@ install_local_package() {
 
     [[ -f "$_MANUAL_PKG_PATH" ]] \
         || die "Arquivo não encontrado: ${_MANUAL_PKG_PATH}"
+
+    # Garante que o arquivo se chama wssh-vpn.tar.gz
+    _normalize_pkg_path
 
     local fsize
     fsize=$(stat -c%s "$_MANUAL_PKG_PATH" 2>/dev/null || echo 0)
@@ -1030,7 +1069,6 @@ install_local_package() {
 _local_upgrade() {
     step "Upgrade manual do binário..."
 
-    # Extrai usando o caminho já definido em _MANUAL_PKG_PATH
     download_package "local"
 
     local NEW_BINARY="/tmp/wssh-extract/${BINARY_NAME}"
@@ -1039,12 +1077,10 @@ _local_upgrade() {
     local prev_ver
     prev_ver=$(get_installed_version)
 
-    # Para serviço e garante que o processo morreu de fato
     info "Parando serviço..."
     systemctl stop wssh-vpn 2>/dev/null || true
     sleep 1
 
-    # Kill forçado em processos residuais (evita "Text file busy")
     local pids
     pids=$(pgrep -x wssh-vpn 2>/dev/null || true)
     if [[ -n "$pids" ]]; then
@@ -1056,16 +1092,12 @@ _local_upgrade() {
         sleep 1
     fi
 
-    # Faz backup do binário atual
     rm -f "$BACKUP_BINARY"
     if [[ -f "$BINARY_TARGET" ]]; then
         cp -a "$BINARY_TARGET" "$BACKUP_BINARY" \
             || warn "Não foi possível criar backup do binário anterior."
     fi
 
-    # Instala novo binário via mv atômico (evita "Text file busy"):
-    # cp para arquivo temporário → mv sobre o destino usa rename() que
-    # substitui a entrada do diretório sem tocar no inode aberto.
     local tmp_new="${BINARY_TARGET}.new"
     cp "$NEW_BINARY" "$tmp_new" && chmod +x "$tmp_new" || {
         rm -f "$tmp_new"
@@ -1081,7 +1113,6 @@ _local_upgrade() {
         die "Upgrade manual falhou. Versão anterior restaurada."
     }
 
-    # Tenta iniciar com novo binário
     if ! systemctl start wssh-vpn 2>/dev/null; then
         warn "Novo binário não iniciou. Restaurando versão anterior..."
         [[ -f "$BACKUP_BINARY" ]] && cp -a "$BACKUP_BINARY" "$BINARY_TARGET" && chmod +x "$BINARY_TARGET"
@@ -1089,7 +1120,6 @@ _local_upgrade() {
         die "Rollback executado. Verifique: journalctl -u wssh-vpn -n 50 --no-pager"
     fi
 
-    # Aguarda estabilização
     local i ready=false
     for i in {1..10}; do
         systemctl is-active --quiet wssh-vpn && { ready=true; break; }
@@ -1128,7 +1158,7 @@ show_menu() {
         echo -e "    ${YELLOW}[1]${NC} Instalar    WSSH-VPN" >&2
         echo -e "    ${YELLOW}[2]${NC} Atualizar   WSSH-VPN" >&2
         echo -e "    ${YELLOW}[3]${NC} Desinstalar WSSH-VPN" >&2
-        echo -e "    ${YELLOW}[4]${NC} Instalar / Atualizar a partir de ${BOLD}arquivo local${NC}" >&2
+        echo -e "    ${YELLOW}[4]${NC} Atualizar a partir de ${BOLD}arquivo local${NC} (${PKG_FILENAME})" >&2
         echo -e "    ${DIM}      (use quando o download automático falhar)${NC}" >&2
         echo -e "    ${YELLOW}[0]${NC} Sair" >&2
         echo "" >&2
@@ -1138,9 +1168,9 @@ show_menu() {
 
         echo "" >&2
         case "$option" in
-            1) install_vpn;          break ;;
-            2) update_vpn;           break ;;
-            3) uninstall_vpn;        break ;;
+            1) install_vpn;           break ;;
+            2) update_vpn;            break ;;
+            3) uninstall_vpn;         break ;;
             4) install_local_package; break ;;
             0) info "Saindo."; exit 0 ;;
             *) warn "Opção inválida: '${option}'. Tente novamente."; echo "" >&2 ;;
@@ -1160,7 +1190,13 @@ main() {
     show_banner
 
     log "=== Installer v${INSTALLER_VERSION} iniciado. OS=${PLATFORM_OS} ARCH=${PLATFORM_ARCH} ==="
-    [[ -n "$_MANUAL_PKG_PATH" ]] && log "Arquivo local: ${_MANUAL_PKG_PATH}"
+    [[ -n "$_MANUAL_PKG_PATH" ]] && log "Arquivo local informado: ${_MANUAL_PKG_PATH}"
+
+    # Se foi passado --file na linha de comando, normaliza imediatamente
+    if [[ -n "$_MANUAL_PKG_PATH" ]]; then
+        [[ -f "$_MANUAL_PKG_PATH" ]] || die "Arquivo não encontrado: ${_MANUAL_PKG_PATH}"
+        _normalize_pkg_path
+    fi
 
     case "${_ACTION:-}" in
         install)   install_vpn            ;;
