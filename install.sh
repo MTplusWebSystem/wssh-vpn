@@ -824,12 +824,29 @@ update_vpn() {
     systemctl stop wssh-vpn \
         || die "Não foi possível parar o serviço. Abortando para preservar instalação atual."
 
+    # Kill forçado em processos residuais (evita "Text file busy")
+    local pids
+    pids=$(pgrep -x wssh-vpn 2>/dev/null || true)
+    if [[ -n "$pids" ]]; then
+        kill $pids 2>/dev/null || true
+        sleep 2
+        pids=$(pgrep -x wssh-vpn 2>/dev/null || true)
+        [[ -n "$pids" ]] && kill -9 $pids 2>/dev/null || true
+        sleep 1
+    fi
+
     rm -f "$BACKUP_BINARY"
     cp -a "$BINARY_TARGET" "$BACKUP_BINARY" \
         || { systemctl start wssh-vpn 2>/dev/null; die "Falha ao criar backup do binário."; }
 
-    cp -a "$NEW_BINARY" "$BINARY_TARGET" \
+    # mv atômico: evita "Text file busy" que ocorre com cp direto
+    local tmp_new="${BINARY_TARGET}.new"
+    cp -a "$NEW_BINARY" "$tmp_new" && chmod +x "$tmp_new" \
+        || { rm -f "$tmp_new"; systemctl start wssh-vpn 2>/dev/null; die "Falha ao preparar novo binário."; }
+
+    mv "$tmp_new" "$BINARY_TARGET" \
         || {
+            rm -f "$tmp_new"
             warn "Falha ao instalar novo binário. Restaurando versão anterior..."
             cp -a "$BACKUP_BINARY" "$BINARY_TARGET"
             chmod +x "$BINARY_TARGET"
@@ -837,7 +854,6 @@ update_vpn() {
             die "Atualização falhou. Versão anterior restaurada."
         }
 
-    chmod +x "$BINARY_TARGET"
     ok "Novo binário instalado."
 
     # ── [4/5] Reinicia serviço ───────────────────────────────────────────────
@@ -1023,23 +1039,47 @@ _local_upgrade() {
     local prev_ver
     prev_ver=$(get_installed_version)
 
-    # Para serviço e faz backup
+    # Para serviço e garante que o processo morreu de fato
+    info "Parando serviço..."
     systemctl stop wssh-vpn 2>/dev/null || true
+    sleep 1
 
+    # Kill forçado em processos residuais (evita "Text file busy")
+    local pids
+    pids=$(pgrep -x wssh-vpn 2>/dev/null || true)
+    if [[ -n "$pids" ]]; then
+        info "Aguardando término dos processos residuais..."
+        kill $pids 2>/dev/null || true
+        sleep 2
+        pids=$(pgrep -x wssh-vpn 2>/dev/null || true)
+        [[ -n "$pids" ]] && kill -9 $pids 2>/dev/null || true
+        sleep 1
+    fi
+
+    # Faz backup do binário atual
     rm -f "$BACKUP_BINARY"
     if [[ -f "$BINARY_TARGET" ]]; then
         cp -a "$BINARY_TARGET" "$BACKUP_BINARY" \
             || warn "Não foi possível criar backup do binário anterior."
     fi
 
-    # Instala novo binário
-    cp "$NEW_BINARY" "$BINARY_TARGET" || {
-        warn "Falha ao copiar binário. Restaurando versão anterior..."
+    # Instala novo binário via mv atômico (evita "Text file busy"):
+    # cp para arquivo temporário → mv sobre o destino usa rename() que
+    # substitui a entrada do diretório sem tocar no inode aberto.
+    local tmp_new="${BINARY_TARGET}.new"
+    cp "$NEW_BINARY" "$tmp_new" && chmod +x "$tmp_new" || {
+        rm -f "$tmp_new"
+        systemctl start wssh-vpn 2>/dev/null || true
+        die "Falha ao preparar novo binário em ${tmp_new}."
+    }
+
+    mv "$tmp_new" "$BINARY_TARGET" || {
+        rm -f "$tmp_new"
+        warn "Falha ao instalar novo binário (mv). Restaurando versão anterior..."
         [[ -f "$BACKUP_BINARY" ]] && cp -a "$BACKUP_BINARY" "$BINARY_TARGET" && chmod +x "$BINARY_TARGET"
         systemctl start wssh-vpn 2>/dev/null || true
         die "Upgrade manual falhou. Versão anterior restaurada."
     }
-    chmod +x "$BINARY_TARGET"
 
     # Tenta iniciar com novo binário
     if ! systemctl start wssh-vpn 2>/dev/null; then
